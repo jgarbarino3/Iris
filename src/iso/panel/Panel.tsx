@@ -7775,12 +7775,15 @@ const Panel = () => {
                 },
               };
             } else if (patch.kind === 'insertAtCursor') {
-              const filename = getActiveFilename() ?? 'snippet.tex';
-              const language = getFenceLanguage(filename) || 'tex';
-              const fence = getSafeMarkdownFence(patch.text);
-              const fenceStart = language ? `${fence}${language}` : fence;
-              const content = `${fenceStart}\n${patch.text}\n${fence}\n`;
-              storedPatchReviewMessage = { role: 'assistant', content };
+              storedPatchReviewMessage = {
+                role: 'system',
+                content: '',
+                patchReview: {
+                  kind: 'insertAtCursor',
+                  text: patch.text,
+                  status: 'pending',
+                },
+              };
             }
 
             if (!storedPatchReviewMessage) return;

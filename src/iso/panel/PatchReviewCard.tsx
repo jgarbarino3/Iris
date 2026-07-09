@@ -147,9 +147,11 @@ export function PatchReviewCard({
     fileLabel = patchReview.filePath;
   } else if (patchReview.kind === 'replaceSelection') {
     fileLabel = patchReview.fileName ?? 'selection.tex';
+  } else if (patchReview.kind === 'insertAtCursor') {
+    fileLabel = 'cursor';
   }
 
-  let title = 'Review changes';
+  let title = patchReview.kind === 'insertAtCursor' ? 'Review insertion' : 'Review changes';
   if (status === 'accepted') {
     title = 'Review changes · Accepted';
   } else if (status === 'rejected') {
@@ -224,15 +226,17 @@ export function PatchReviewCard({
               >
                 ✕
               </button>
-              <button
-                class="ageaf-panel__apply is-secondary"
-                type="button"
-                disabled={busy}
-                onClick={onFeedback}
-                aria-label="Provide feedback on this change"
-              >
-                Feedback
-              </button>
+              {patchReview.kind !== 'insertAtCursor' ? (
+                <button
+                  class="ageaf-panel__apply is-secondary"
+                  type="button"
+                  disabled={busy}
+                  onClick={onFeedback}
+                  aria-label="Provide feedback on this change"
+                >
+                  Feedback
+                </button>
+              ) : null}
             </>
           ) : null}
         </div>
@@ -269,6 +273,14 @@ export function PatchReviewCard({
             fileName={patchReview.fileName ?? undefined}
             animate={shouldAnimateRef.current}
             startLineNumber={startLineNumber}
+            isLightMode={isLightMode}
+          />
+        ) : patchReview.kind === 'insertAtCursor' ? (
+          <DiffReview
+            oldText=""
+            newText={patchReview.text}
+            fileName="cursor"
+            animate={shouldAnimateRef.current}
             isLightMode={isLightMode}
           />
         ) : null}
@@ -335,6 +347,15 @@ export function PatchReviewCard({
                   animate={false}
                   wrap={true}
                   startLineNumber={startLineNumber}
+                  isLightMode={isLightMode}
+                />
+              ) : patchReview.kind === 'insertAtCursor' ? (
+                <DiffReview
+                  oldText=""
+                  newText={patchReview.text}
+                  fileName="cursor"
+                  animate={false}
+                  wrap={true}
                   isLightMode={isLightMode}
                 />
               ) : null}
