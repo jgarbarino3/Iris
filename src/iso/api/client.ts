@@ -1,4 +1,5 @@
 import type { Options } from '../../types';
+import type { DiagnosticReportV1 } from '../diagnostics/types';
 import { createTransport } from '../messaging/transport';
 import {
   type AttachmentMeta,
@@ -15,6 +16,7 @@ import {
 import { streamEvents, type JobEvent } from './sse';
 
 export { streamEvents, validateDocumentEntries };
+export type { DiagnosticReportV1 } from '../diagnostics/types';
 export type {
   AttachmentMeta,
   ClaudeContextUsageResponse,
@@ -114,6 +116,10 @@ export async function fetchPiRuntimeContextUsage(
 
 export async function fetchHostHealth(options: Options): Promise<HostHealthResponse> {
   return createTransport(options).fetchHostHealth();
+}
+
+export async function fetchDiagnostics(options: Options): Promise<DiagnosticReportV1> {
+  return createTransport(options).fetchDiagnostics();
 }
 
 export async function openAttachmentDialog(

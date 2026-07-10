@@ -28,6 +28,7 @@ import {
   fetchPiRuntimeMetadata,
   updatePiRuntimePreferences,
   fetchHostHealth,
+  fetchDiagnostics,
   openAttachmentDialog,
   respondToJobRequest,
   streamJobEvents,
@@ -36,7 +37,9 @@ import {
   validateDocumentEntries,
   type JobEvent,
   type AttachmentMeta,
+  type DiagnosticReportV1,
 } from '../api/client';
+import { runBrowserDiagnostics } from '../diagnostics/browserDiagnostics';
 import type {
   NativeHostRequest,
   NativeHostResponse,
@@ -972,6 +975,9 @@ const Panel = () => {
   const [nativeStatusError, setNativeStatusError] = useState<string | null>(
     null
   );
+  const [doctorReport, setDoctorReport] = useState<DiagnosticReportV1 | null>(null);
+  const [doctorBusy, setDoctorBusy] = useState(false);
+  const [doctorError, setDoctorError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -1697,6 +1703,23 @@ const Panel = () => {
       setNativeStatusError(
         error instanceof Error ? error.message : 'native check failed'
       );
+    }
+  };
+
+  const runDoctor = async () => {
+    if (doctorBusy) return;
+    setDoctorBusy(true);
+    setDoctorError(null);
+    try {
+      const options = settings ?? (await getOptions());
+      const hostReport = await fetchDiagnostics(options);
+      const report = await runBrowserDiagnostics(hostReport);
+      setDoctorReport(report);
+    } catch (error) {
+      setDoctorReport(null);
+      setDoctorError(error instanceof Error ? error.message : 'Doctor failed');
+    } finally {
+      setDoctorBusy(false);
     }
   };
 
@@ -11376,6 +11399,44 @@ const Panel = () => {
                           </button>
                         </>
                       )}
+                      <div class="ageaf-settings__doctor">
+                        <h4>Doctor</h4>
+                        <p class="ageaf-settings__hint">
+                          Read-only checks for the host, transport, panel, project,
+                          file, bridge, and editor.
+                        </p>
+                        <button
+                          type="button"
+                          class="ageaf-settings__button"
+                          onClick={() => void runDoctor()}
+                          disabled={doctorBusy}
+                        >
+                          {doctorBusy ? 'Running…' : 'Run Doctor'}
+                        </button>
+                        {doctorError ? (
+                          <p class="ageaf-settings__hint">Doctor error: {doctorError}</p>
+                        ) : null}
+                        {doctorReport ? (
+                          <div aria-live="polite">
+                            <p class="ageaf-settings__hint">
+                              Overall status: {doctorReport.overallStatus}
+                            </p>
+                            {doctorReport.checks.map((check) => (
+                              <div key={check.id} class="ageaf-settings__doctor-check">
+                                <strong>[{check.status}] {check.summary}</strong>
+                                {check.repair ? (
+                                  <p class="ageaf-settings__hint">
+                                    Repair guidance: {check.repair.summary}
+                                    {check.repair.command
+                                      ? ` Command: ${check.repair.command}`
+                                      : ''}
+                                  </p>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   ) : null}
                   {settingsTab === 'customization' ? (

@@ -47,6 +47,16 @@ This file records target-perspective proof, not just implementation claims.
 - Host `npm run typecheck`: passed.
 - Complete root `npm run verify`: passed with 374 root tests, 308 host tests, both formatting/typecheck/build gates, and 1 Playwright browser smoke.
 
+### P1-03 — Read-only Doctor and shared diagnostics
+
+- `DiagnosticReportV1` / `DiagnosticCheckV1` define versioned status, category, requiredness, evidence, and narrowly scoped repair guidance. Host and extension contracts carry the same protocol fields.
+- `GET /v1/diagnostics` and `npm --prefix host run doctor -- --json` use the same pure host diagnostic runner. The CLI was executed directly as JSON and returned schema version `1`, five checks, and `degraded` because one optional runtime was not configured; it performed no repair.
+- The existing HTTP/native transport facade now carries diagnostics. The Connection settings panel runs Doctor and augments host checks with read-only Overleaf project, panel, bridge, active-file, and editor-selection probes.
+- Repair remains separate from diagnosis: the report exposes manual/local-safe guidance and optional commands, while the panel has no repair executor.
+- Focused host diagnostics tests: 2 passed, 0 failed.
+- Focused extension Doctor contract tests: 3 passed, 0 failed.
+- Complete root `npm run verify`: passed with 377 root tests, 310 host tests, root/host format checks, type checks, production builds, and 1 Playwright browser smoke.
+
 ### P1-02 — CI and deterministic browser baseline
 
 - Root `package.json` now exposes `typecheck`, `format:check`, `test:browser`, and one `verify` aggregator; the host exposes matching `typecheck`, `format:check`, and `verify` commands.

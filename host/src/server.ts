@@ -1,13 +1,19 @@
 import Fastify from 'fastify';
 
+import type { HostDiagnosticDependencies } from './diagnostics/runHostDiagnostics.js';
 import { registerAttachments } from './routes/attachments.js';
+import { registerDiagnostics } from './routes/diagnostics.js';
 import { registerHealth } from './routes/health.js';
 import { registerJobs } from './routes/jobs.js';
 import { registerRuntime } from './routes/runtime.js';
 import registerSessionRoutes from './routes/sessions.js';
 import { shutdownToolRuntime } from './runtimes/pi/toolRuntime.js';
 
-export function buildServer() {
+export type BuildServerOptions = {
+  diagnostics?: Partial<HostDiagnosticDependencies>;
+};
+
+export function buildServer(options: BuildServerOptions = {}) {
   const server = Fastify({ logger: false, bodyLimit: 50 * 1024 * 1024 });
 
   server.addHook('onRequest', (request, reply, done) => {
@@ -28,6 +34,7 @@ export function buildServer() {
   });
 
   registerHealth(server);
+  registerDiagnostics(server, options.diagnostics);
   registerAttachments(server);
   registerJobs(server);
   registerRuntime(server);

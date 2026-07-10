@@ -1,4 +1,5 @@
 import type { Options } from '../../types';
+import type { DiagnosticReportV1 } from '../diagnostics/types';
 import { httpTransport } from './httpTransport';
 import { nativeTransport } from './nativeTransport';
 import type {
@@ -57,6 +58,7 @@ export type Transport = {
   }>;
   fetchPiRuntimeContextUsage: (conversationId?: string) => Promise<PiContextUsageResponse>;
   fetchHostHealth: () => Promise<HostHealthResponse>;
+  fetchDiagnostics: () => Promise<DiagnosticReportV1>;
 
   openAttachmentDialog: (payload: { multiple?: boolean; extensions?: string[] }) => Promise<{ paths: string[] }>;
   validateAttachmentEntries: (payload: {

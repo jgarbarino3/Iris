@@ -12,9 +12,10 @@
     "start": "node dist/start.js",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "format:check": "prettier --check --ignore-unknown \"package.json\" \"tsconfig.json\"",
+    "format:check": "prettier --check --ignore-unknown \"package.json\" \"tsconfig.json\" \"src/diagnostics/**/*.ts\" \"src/routes/diagnostics.ts\" \"src/doctor.ts\" \"test/diagnostics.test.ts\"",
     "verify": "npm run format:check && npm run typecheck && npm test && npm run build",
-    "native": "tsx src/native.ts"
+    "native": "tsx src/native.ts",
+    "doctor": "tsx src/doctor.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.14",

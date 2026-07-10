@@ -1,4 +1,5 @@
 import type { Options } from '../../types';
+import type { DiagnosticReportV1 } from '../diagnostics/types';
 
 import { streamEvents, JobEvent } from './sse';
 
@@ -402,6 +403,17 @@ export async function fetchCodexRuntimeContextUsage(
   }
 
   return response.json() as Promise<CodexContextUsageResponse>;
+}
+
+export async function fetchDiagnostics(options: Options) {
+  if (!options.hostUrl) {
+    throw new Error('Host URL not configured');
+  }
+  const response = await fetch(new URL('/v1/diagnostics', options.hostUrl).toString());
+  if (!response.ok) {
+    throw new Error(`Diagnostics request failed (${response.status})`);
+  }
+  return response.json() as Promise<DiagnosticReportV1>;
 }
 
 export async function fetchHostHealth(options: Options) {

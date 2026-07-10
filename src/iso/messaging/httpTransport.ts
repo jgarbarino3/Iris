@@ -13,6 +13,7 @@ import {
   updatePiRuntimePreferences as httpUpdatePiRuntimePreferences,
   fetchPiRuntimeContextUsage as httpFetchPiRuntimeContextUsage,
   fetchHostHealth as httpFetchHostHealth,
+  fetchDiagnostics as httpFetchDiagnostics,
   openAttachmentDialog as httpOpenAttachmentDialog,
   validateAttachmentEntries as httpValidateAttachmentEntries,
   deleteSession as httpDeleteSession,
@@ -65,6 +66,8 @@ export function httpTransport(options: Options): Transport {
     ) => httpFetchPiRuntimeContextUsage(options, conversationId),
 
     fetchHostHealth: () => httpFetchHostHealth(options),
+
+    fetchDiagnostics: () => httpFetchDiagnostics(options),
 
     openAttachmentDialog: (
       payload: Parameters<typeof httpOpenAttachmentDialog>[1]

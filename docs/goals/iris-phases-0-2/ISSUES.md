@@ -7,8 +7,8 @@ Status values: `pending`, `active`, `verified`, `blocked`, `superseded`.
 | P0-01 | verified | Freeze product, architecture, schemas, cutover, and evidence package                                                 | Goal package / plan review                        | —            |
 | P1-01 | verified | Establish Node 24 root/host clean baseline and reconcile insertion test truth                                        | Package scripts / CLI tests-builds                | P0-01        |
 | P1-02 | verified | Add CI, typecheck, format-check, verification aggregator, and Playwright fixture                                     | CI + browser harness                              | P1-01        |
-| P1-03 | active   | Implement shared diagnostics, read-only Doctor, panel checks, and safe repair                                        | Diagnostic schema / CLI+browser reports           | P1-01        |
-| P1-04 | pending  | Implement loopback pairing, token persistence/reset, strict CORS, and authenticated streaming                        | Host auth service / Fastify injection             | P1-01        |
+| P1-03 | verified | Implement shared diagnostics, read-only Doctor, panel checks, and safe repair                                        | Diagnostic schema / CLI+browser reports           | P1-01        |
+| P1-04 | active   | Implement loopback pairing, token persistence/reset, strict CORS, and authenticated streaming                        | Host auth service / Fastify injection             | P1-01        |
 | P1-05 | pending  | Implement bridge handshake, capability health, reconnect, and fail-closed apply controls                             | Bridge protocol / browser fixture                 | P1-02        |
 | P1-06 | pending  | Separate runtime permissions from `documentEditMode=review` and migrate labels/settings                              | Options model / UI behavior                       | P1-01        |
 | P2-01 | pending  | Add shared transaction/batch/error schemas and background IndexedDB service                                          | Transaction service / storage restart tests       | P1-02, P1-05 |
@@ -23,7 +23,8 @@ Status values: `pending`, `active`, `verified`, `blocked`, `superseded`.
 
 ## Execution checkpoints
 
-- A0 verified: the Ubuntu compaction race now uses an injected, explicitly gated Claude runtime test double; focused and complete `npm run verify` gates pass locally. P1-03 remains the active issue.
+- A0 verified: the Ubuntu compaction race now uses an injected, explicitly gated Claude runtime test double; focused and complete `npm run verify` gates pass locally.
+- A1 / P1-03 verified: versioned host and browser diagnostics, the read-only Doctor CLI/route, in-panel checks, and manual safe-repair guidance pass focused tests and the complete verification entry point. P1-04 is active.
 
 ## Parallelism rules
 

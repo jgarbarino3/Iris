@@ -1,4 +1,5 @@
 import type { Options } from '../../types';
+import type { DiagnosticReportV1 } from '../diagnostics/types';
 import type { NativeHostRequest, NativeHostResponse } from './nativeProtocol';
 import type { Transport } from './transport';
 import type {
@@ -271,6 +272,15 @@ export function nativeTransport(_options: Options): Transport {
         request: { method: 'GET', path: '/v1/health' },
       });
       return unwrapNativeResponse(response) as HostHealthResponse;
+    },
+
+    async fetchDiagnostics() {
+      const response = await sendNativeRequest({
+        id: crypto.randomUUID(),
+        kind: 'request',
+        request: { method: 'GET', path: '/v1/diagnostics' },
+      });
+      return unwrapNativeResponse(response) as DiagnosticReportV1;
     },
 
     async openAttachmentDialog(payload: { multiple?: boolean; extensions?: string[] }) {
