@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-test('insertAtCursor patches render as code blocks (no review card)', () => {
+test('insertAtCursor patches never degrade to a copy-only assistant block', () => {
   const panelPath = path.join(__dirname, '..', 'src', 'iso', 'panel', 'Panel.tsx');
   const contents = fs.readFileSync(panelPath, 'utf8');
 
@@ -13,12 +13,17 @@ test('insertAtCursor patches render as code blocks (no review card)', () => {
   assert.ok(patchEnd >= 0, 'expected done handler after patch handler');
   const patchHandler = contents.slice(patchStart, patchEnd);
 
-  // We still handle insertAtCursor patches (they can be emitted by runtimes),
-  // but they should not become a "Review changes" card.
+  // Runtime insertion proposals must remain actionable review state. A fenced
+  // assistant block would reintroduce manual copy/paste and lose target state.
   assert.match(patchHandler, /patch\.kind === 'insertAtCursor'/);
-  assert.doesNotMatch(patchHandler, /kind:\s*'insertAtCursor'/);
+  const insertStart = patchHandler.indexOf("patch.kind === 'insertAtCursor'");
+  const insertEnd = patchHandler.indexOf('if (!storedPatchReviewMessage)', insertStart);
+  assert.ok(insertEnd > insertStart, 'expected bounded insert review branch');
+  const insertBranch = patchHandler.slice(insertStart, insertEnd);
 
-  // Instead, format the proposed text as a fenced code block in an assistant message.
-  assert.match(patchHandler, /getSafeMarkdownFence/);
-  assert.match(patchHandler, /role:\s*'assistant'/);
+  assert.match(insertBranch, /patchReview:/);
+  assert.match(insertBranch, /kind:\s*'insertAtCursor'/);
+  assert.match(insertBranch, /status:\s*'pending'/);
+  assert.doesNotMatch(insertBranch, /getSafeMarkdownFence/);
+  assert.doesNotMatch(insertBranch, /role:\s*'assistant'/);
 });

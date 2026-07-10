@@ -24,6 +24,9 @@ import { canonicalizePatchFilePath, computePerHunkReplacements, extractOverleafF
 
 type EmitEvent = (event: JobEvent) => void;
 type ClaudeQueryRunner = (input: Parameters<typeof sdkQuery>[0]) => ReturnType<typeof sdkQuery>;
+type ClaudeQueryTestRunner = (
+  input: Parameters<typeof sdkQuery>[0],
+) => AsyncIterable<unknown>;
 
 let claudeQueryRunner: ClaudeQueryRunner = sdkQuery as ClaudeQueryRunner;
 
@@ -171,8 +174,10 @@ function extractSessionIdFromMessage(message: unknown): string | null {
   );
 }
 
-export function setClaudeQueryForTests(runner: ClaudeQueryRunner) {
-  claudeQueryRunner = runner;
+export function setClaudeQueryForTests(runner: ClaudeQueryTestRunner) {
+  // Production keeps the full SDK Query contract. Tests intentionally provide
+  // stream-only doubles because runQuery consumes only the async iterator.
+  claudeQueryRunner = runner as ClaudeQueryRunner;
 }
 
 export function resetClaudeQueryForTests() {

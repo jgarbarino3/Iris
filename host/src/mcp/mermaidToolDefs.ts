@@ -85,7 +85,20 @@ export const MERMAID_TOOLS = [
  * Requires the `tool` function from `@anthropic-ai/claude-agent-sdk`.
  */
 export function getMermaidSdkTools(toolFn: typeof import('@anthropic-ai/claude-agent-sdk').tool) {
-  return MERMAID_TOOLS.map((t) => toolFn(t.name, t.desc, t.schema, t.handler));
+  return [
+    toolFn(
+      RENDER_MERMAID_NAME,
+      RENDER_MERMAID_DESC,
+      renderMermaidSchema,
+      handleRenderMermaid,
+    ),
+    toolFn(
+      LIST_THEMES_NAME,
+      LIST_THEMES_DESC,
+      listThemesSchema,
+      handleListThemes,
+    ),
+  ];
 }
 
 /**

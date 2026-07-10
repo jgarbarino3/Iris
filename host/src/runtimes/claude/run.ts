@@ -19,22 +19,32 @@ import { getClaudeSessionCwd } from './cwd.js';
 
 type EmitEvent = (event: JobEvent) => void;
 
+type ClaudeMessageParam = SDKUserMessage['message'];
+type ClaudeContentBlockParam = Exclude<ClaudeMessageParam['content'], string>[number];
+type ClaudeImageBlockParam = Extract<ClaudeContentBlockParam, { type: 'image' }>;
+type ClaudeBase64ImageSource = Extract<
+  ClaudeImageBlockParam['source'],
+  { type: 'base64' }
+>;
+type ClaudeImageMediaType = ClaudeBase64ImageSource['media_type'];
+
+const CLAUDE_IMAGE_MEDIA_TYPES = new Set<ClaudeImageMediaType>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+function isClaudeImageMediaType(value: string): value is ClaudeImageMediaType {
+  return CLAUDE_IMAGE_MEDIA_TYPES.has(value as ClaudeImageMediaType);
+}
+
 type ClaudeImageAttachment = {
   id: string;
   name: string;
-  mediaType: string;
+  mediaType: ClaudeImageMediaType;
   data: string;
   size: number;
-};
-
-type ClaudeContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string } };
-
-type ClaudeUserMessage = {
-  role: 'user';
-  content: ClaudeContentBlock[];
 };
 
 type ProjectFile = { path: string; content: string };
@@ -88,7 +98,7 @@ function getContextImages(context: unknown): ClaudeImageAttachment[] {
       const size = Number(candidate.size ?? NaN);
       if (!id || !name || !mediaType || !data) return null;
       if (!Number.isFinite(size) || size < 0) return null;
-      if (!mediaType.startsWith('image/')) return null;
+      if (!isClaudeImageMediaType(mediaType)) return null;
       return { id, name, mediaType, data, size };
     })
     .filter(
@@ -169,7 +179,7 @@ function buildMediaPromptStream(
   images: ClaudeImageAttachment[],
   pdfDocuments: ResolvedDocument[] = []
 ): AsyncIterable<SDKUserMessage> {
-  const contentBlocks: ClaudeContentBlock[] = [
+  const contentBlocks: ClaudeContentBlockParam[] = [
     ...images.map((image) => ({
       type: 'image' as const,
       source: {
@@ -182,26 +192,27 @@ function buildMediaPromptStream(
       type: 'document' as const,
       source: {
         type: 'base64' as const,
-        media_type: doc.mediaType,
+        media_type: 'application/pdf' as const,
         data: doc.base64,
       },
     })),
     { type: 'text', text: promptText },
   ];
 
-  const message: ClaudeUserMessage = {
+  const message: ClaudeMessageParam = {
     role: 'user',
     content: contentBlocks,
   };
 
   return {
     async *[Symbol.asyncIterator]() {
-      yield {
+      const userMessage: SDKUserMessage = {
         type: 'user',
         message,
         parent_tool_use_id: null,
         session_id: '',
       };
+      yield userMessage;
     },
   };
 }

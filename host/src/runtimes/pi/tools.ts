@@ -173,12 +173,13 @@ async function searchViaBrave(
   query: string,
   count: number,
   apiKey: string,
+  fetchImpl: typeof fetch,
 ): Promise<{ title: string; url: string; snippet: string }[]> {
   const searchUrl = new URL('https://api.search.brave.com/res/v1/web/search');
   searchUrl.searchParams.set('q', query);
   searchUrl.searchParams.set('count', String(count));
 
-  const response = await fetch(searchUrl.toString(), {
+  const response = await fetchImpl(searchUrl.toString(), {
     headers: {
       'Accept': 'application/json',
       'Accept-Encoding': 'gzip',
@@ -208,11 +209,12 @@ async function searchViaBrave(
 async function searchViaDuckDuckGo(
   query: string,
   count: number,
+  fetchImpl: typeof fetch,
 ): Promise<{ title: string; url: string; snippet: string }[]> {
   const ddgUrl = new URL('https://html.duckduckgo.com/html/');
   ddgUrl.searchParams.set('q', query);
 
-  const response = await fetch(ddgUrl.toString(), {
+  const response = await fetchImpl(ddgUrl.toString(), {
     method: 'POST',
     headers: {
       'User-Agent': 'Ageaf-WebSearch/1.0',
@@ -264,7 +266,10 @@ async function searchViaDuckDuckGo(
   return results;
 }
 
-export function createWebSearchTool(): AgentTool<typeof WebSearchParams> {
+export function createWebSearchTool(
+  options: { fetchImpl?: typeof fetch } = {},
+): AgentTool<typeof WebSearchParams> {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   return {
     name: 'web_search',
     label: 'Web Search',
@@ -277,10 +282,10 @@ export function createWebSearchTool(): AgentTool<typeof WebSearchParams> {
       let results: { title: string; url: string; snippet: string }[];
 
       if (apiKey) {
-        results = await searchViaBrave(params.query, count, apiKey);
+        results = await searchViaBrave(params.query, count, apiKey, fetchImpl);
       } else {
         // Free fallback: DuckDuckGo HTML search
-        results = await searchViaDuckDuckGo(params.query, count);
+        results = await searchViaDuckDuckGo(params.query, count, fetchImpl);
       }
 
       if (results.length === 0) {

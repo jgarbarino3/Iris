@@ -28,6 +28,8 @@ lerna-debug.log*
 coverage/
 .nyc_output/
 *.lcov
+playwright-report/
+test-results/
 
 # IDE and editors
 .vscode/
@@ -65,6 +67,8 @@ docs/*
 !docs/manus/
 !docs/manus/**
 !docs/native-messaging.md
+!docs/goals/
+!docs/goals/**
 
 *.rb
 

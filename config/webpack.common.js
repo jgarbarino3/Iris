@@ -18,6 +18,9 @@ const common = {
     path: PATHS.build,
     // the filename template for entry chunks
     filename: '[name].js',
+    // Content scripts do not expose a current script URL for Webpack's automatic
+    // public-path inference. The ISO entry sets the extension URL at runtime.
+    publicPath: '',
     // Async chunks must be web-accessible for content scripts on Overleaf.
     // Keep them on the `vendors-*.js` pattern allowed by `public/manifest.json`.
     chunkFilename: 'vendors-[id].js',

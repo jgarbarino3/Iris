@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Ageaf for Overleaf",
   "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "prebuild": "node scripts/generate-skills-manifest.cjs",
     "prewatch": "node scripts/generate-skills-manifest.cjs",
@@ -12,9 +15,14 @@
     "pack": "node pack.js",
     "repack": "npm run build && npm run pack",
     "test": "node --test test/*.test.cjs",
-    "format": "prettier --write --ignore-unknown \"{config,public,src}/**/*.{html,css,js,ts,json}\""
+    "test:browser": "npm run build && playwright test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write --ignore-unknown \"{config,public,src}/**/*.{html,css,js,ts,json}\"",
+    "format:check": "prettier --check --ignore-unknown \".github/**/*.{yml,yaml}\" \"config/webpack.common.js\" \"docs/goals/**/*.md\" \"playwright.config.ts\" \"test/browser/**/*.ts\" \"test/phase1-tooling.test.cjs\" \"test/webpack-public-path.test.cjs\" \"package.json\" \"tsconfig.json\"",
+    "verify": "npm run format:check && npm run typecheck && npm test && npm --prefix host run verify && npm run test:browser"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@types/chrome": "^0.0.181",
     "@types/katex": "^0.16.8",
     "@types/prismjs": "^1.26.5",

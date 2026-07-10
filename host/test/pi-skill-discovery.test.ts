@@ -13,6 +13,20 @@ function restoreEnv(key: string, original: string | undefined) {
   }
 }
 
+function firstTextContent(result: unknown): string {
+  assert.ok(result && typeof result === 'object');
+  const content = (result as { content?: unknown }).content;
+  assert.ok(Array.isArray(content));
+  const block = content[0];
+  assert.ok(block && typeof block === 'object');
+  assert.equal((block as { type?: unknown }).type, 'text');
+  const text = (block as { text?: unknown }).text;
+  if (typeof text !== 'string') {
+    assert.fail('expected first content block to contain text');
+  }
+  return text;
+}
+
 // ─── skills.ts unit tests ───
 
 test('loadSkillsManifest dedupes discovered entries by name', async () => {
@@ -307,7 +321,7 @@ test('find_skill returns native skill for matching query', async () => {
 
     // Search for "mermaid" which should match the native mermaid skill
     const result = await findSkill.execute('test-call-1', { query: 'mermaid' });
-    const text = result.content[0]?.text ?? '';
+    const text = firstTextContent(result);
     assert.ok(text.includes('native skill'), `should find native skill, got: ${text.slice(0, 200)}`);
     assert.ok(text.includes('mermaid'), 'should mention mermaid');
   } finally {
@@ -325,7 +339,7 @@ test('find_skill returns empty query error', async () => {
     const findSkill = tools.find((t) => t.name === 'find_skill')!;
 
     const result = await findSkill.execute('test-call-2', { query: '' });
-    const text = result.content[0]?.text ?? '';
+    const text = firstTextContent(result);
     assert.ok(text.includes('Error'), 'should return error for empty query');
   } finally {
     await backend.shutdown();
@@ -353,7 +367,7 @@ test('create_skill validates and saves skill', async () => {
         description: 'A custom skill for testing',
         content,
       });
-      const text = result.content[0]?.text ?? '';
+      const text = firstTextContent(result);
       assert.ok(text.includes('Skill created'), `should confirm creation, got: ${text.slice(0, 200)}`);
       assert.ok(text.includes('/my-custom-skill'), 'should include activation syntax');
 
@@ -383,7 +397,7 @@ test('create_skill rejects invalid name', async () => {
       description: 'test',
       content: '---\ndescription: test\n---\n\nBody',
     });
-    const text = result.content[0]?.text ?? '';
+    const text = firstTextContent(result);
     assert.ok(text.includes('Error'), 'should reject invalid name');
     assert.ok(text.includes('invalid skill name'), 'should mention invalid name');
   } finally {
@@ -405,7 +419,7 @@ test('create_skill rejects invalid content (missing description)', async () => {
       description: 'test',
       content: '---\nname: valid-name\n---\n\nNo description in frontmatter.',
     });
-    const text = result.content[0]?.text ?? '';
+    const text = firstTextContent(result);
     assert.ok(text.includes('Error'), 'should reject missing description');
   } finally {
     await backend.shutdown();
@@ -434,7 +448,7 @@ test('create_skill uses frontmatter name as canonical when valid', async () => {
         description: 'test',
         content,
       });
-      const text = result.content[0]?.text ?? '';
+      const text = firstTextContent(result);
       assert.ok(text.includes('/frontmatter-name'), 'should use frontmatter name as canonical');
 
       // Verify saved under frontmatter name
@@ -471,7 +485,7 @@ test('create_skill falls back to parameter name when frontmatter name is invalid
         description: 'test',
         content,
       });
-      const text = result.content[0]?.text ?? '';
+      const text = firstTextContent(result);
       assert.ok(text.includes('/valid-param'), 'should fall back to parameter name');
 
       const skillPath = path.join(tmpDir, 'local', 'valid-param', 'SKILL.md');
@@ -540,7 +554,7 @@ test('find_skill Tier-2 returns content directly when discovered name conflicts 
       const findSkill = tools.find((t) => t.name === 'find_skill')!;
 
       const result = await findSkill.execute('test-conflict', { query: 'gantt' });
-      const text = result.content[0]?.text ?? '';
+      const text = firstTextContent(result);
 
       // Should indicate shadowing and return content directly
       assert.ok(

@@ -91,21 +91,68 @@ test('stripHtml collapses whitespace', () => {
 
 // ── web_search tool tests ───────────────────────────────────────────
 
-test('web_search falls back to DuckDuckGo without API key (returns results)', async () => {
+test('web_search uses the deterministic DuckDuckGo fallback without an API key', async () => {
   const saved = process.env.AGEAF_PI_WEB_SEARCH_API_KEY;
   delete process.env.AGEAF_PI_WEB_SEARCH_API_KEY;
 
   try {
-    const tool = createWebSearchTool();
+    const requests: Array<{ input: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      requests.push({ input: String(input), init });
+      return new Response(
+        [
+          '<div class="result result--url-above-snippet">',
+          '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ffirst">First result</a>',
+          '<a class="result__snippet">First <b>snippet</b></a>',
+          '</div>',
+          '<div class="result result--url-above-snippet">',
+          '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fsecond">Second result</a>',
+          '<a class="result__snippet">Second snippet</a>',
+          '</div>',
+        ].join(''),
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
+    };
+    const tool = createWebSearchTool({ fetchImpl });
     assert.equal(tool.name, 'web_search');
 
-    const result = await tool.execute('test-1', { query: 'wikipedia' });
+    const result = await tool.execute('test-1', { query: 'latex editor', count: 1 });
     assert.ok(result.content.length > 0, 'should return content');
 
-    const text = (result.content[0] as any).text;
-    // Should get actual results, not a "not configured" message
-    assert.ok(!text.includes('not configured'), 'should NOT say not configured (DDG fallback)');
-    assert.ok(text.includes('URL:'), 'should contain result URLs');
+    assert.equal(requests.length, 1);
+    const request = requests[0]!;
+    const url = new URL(request.input);
+    assert.equal(url.host, 'html.duckduckgo.com');
+    assert.equal(url.pathname, '/html/');
+    assert.equal(request.init?.method, 'POST');
+    assert.equal(request.init?.body, 'q=latex%20editor');
+
+    const content = result.content[0];
+    assert.equal(content?.type, 'text');
+    const text = content.type === 'text' ? content.text : '';
+    assert.match(text, /First result/);
+    assert.match(text, /URL: https:\/\/example\.com\/first/);
+    assert.match(text, /First snippet/);
+    assert.doesNotMatch(text, /Second result/);
+  } finally {
+    if (saved !== undefined) {
+      process.env.AGEAF_PI_WEB_SEARCH_API_KEY = saved;
+    }
+  }
+});
+
+test('web_search surfaces DuckDuckGo HTTP failures', async () => {
+  const saved = process.env.AGEAF_PI_WEB_SEARCH_API_KEY;
+  delete process.env.AGEAF_PI_WEB_SEARCH_API_KEY;
+
+  try {
+    const tool = createWebSearchTool({
+      fetchImpl: async () => new Response('', { status: 429 }),
+    });
+    await assert.rejects(
+      () => tool.execute('test-ddg-error', { query: 'latex' }),
+      /DuckDuckGo search error: 429/,
+    );
   } finally {
     if (saved !== undefined) {
       process.env.AGEAF_PI_WEB_SEARCH_API_KEY = saved;
