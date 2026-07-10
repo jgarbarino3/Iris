@@ -17,8 +17,9 @@ test('Main editor bridge registers Ageaf events', () => {
   assert.match(contents, /registerEditorBridge/);
   assert.match(contents, /ageaf:editor:request/);
   assert.match(contents, /ageaf:editor:response/);
-  assert.match(contents, /ageaf:editor:replace/);
-  assert.match(contents, /ageaf:editor:insert/);
+  assert.match(contents, /ageaf:editor:hello:request/);
+  assert.match(contents, /ageaf:editor:apply:request/);
+  assert.doesNotMatch(contents, /copilot:editor:replace/);
 });
 
 test('registerEditorBridge tolerates early tracker bootstrap failure and still registers listeners', () => {

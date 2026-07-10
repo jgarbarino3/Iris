@@ -86,6 +86,17 @@ This file records target-perspective proof, not just implementation claims.
 - The complete top-level `npm run verify` command passed end to end with root formatting/typecheck/tests/build, host formatting/typecheck/tests/build, and the browser smoke. Local browser execution used the exact pinned package through npm's temporary execution environment because this read/write harness does not install into project `node_modules`; CI will exercise the committed lockfile through a real `npm ci`.
 - P1-02 changed verification infrastructure and the minimal Webpack startup repair only; it did not begin diagnostics, pairing/authentication, or transaction architecture.
 
+### P1-05 — Central editor adapter and resilient bridge
+
+- `src/iso/editorAdapter.ts` is the only isolated-world request correlation boundary. `src/iso/contentScript.ts` installs the facade and triggers bounded health refreshes on startup, focus, pageshow, visibility restoration, and a periodic interval; it no longer owns parallel request maps or write events.
+- The V1 hello exchange uses a request ID and nonce and reports the main-world bridge instance, monotonic event cursor, exact Overleaf project identity, active file, readiness, and capabilities. Protocol, cursor, and project mismatches degrade or block the bridge.
+- Selection, file reads, navigation, history, and apply requests all have bounded timeouts. Mutations require a current ready handshake and the specific advertised capability; failure returns an explicit result instead of dispatching optimistically.
+- Cursor insertion now travels through the existing acknowledged apply request/response channel. The panel waits for `{ ok: true }` before marking a review card accepted and surfaces the returned error otherwise.
+- `replaceInFile` verifies the active filename or activates and re-verifies the requested target before resolving replacement ranges or inspecting editor content. The original file restoration behavior remains intact.
+- The unused direct `ageaf:editor:insert`, `ageaf:editor:replace`, and legacy `copilot:editor:replace` document writers were removed, leaving the acknowledged apply handler as the mutation entry point for panel review actions.
+- Focused P1-05 contract verification: 5 passed, covering adapter ownership, version/timeout/fail-closed rules, main-world capabilities and insertion acknowledgement, acceptance-after-acknowledgement, and target-file-before-content ordering.
+- Complete root `npm run verify`: passed with 387 root tests, 318 host tests, root/host formatting checks, type checks, production builds, and 1 deterministic Playwright extension smoke.
+
 ### Dependency-audit reachability record
 
 The baseline intentionally records risk without running a broad `npm audit fix`, because its dry run would update major runtime/build surfaces and large provider dependency trees outside this issue.
@@ -107,7 +118,8 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - P1-02: verified.
 - P1-03: verified.
 - P1-04: verified.
-- P1-05 is the next active issue.
+- P1-05: verified.
+- P1-06 is the next active issue.
 
 ## Phase 2
 

@@ -3,6 +3,7 @@ import type {
   DiagnosticReportV1,
   DiagnosticStatusV1,
 } from './types';
+import type { EditorBridgeHealth } from '../editorAdapter';
 
 type SelectionProbe = {
   activeName?: string | null;
@@ -15,6 +16,7 @@ export type BrowserDiagnosticDependencies = {
   pathname: string;
   panelPresent: boolean;
   bridgePresent: boolean;
+  refreshBridgeHealth?: () => Promise<EditorBridgeHealth>;
   requestSelection?: () => Promise<SelectionProbe>;
 };
 
@@ -46,6 +48,22 @@ async function probeSelection(
   }
 }
 
+async function probeBridgeHealth(
+  refreshBridgeHealth: BrowserDiagnosticDependencies['refreshBridgeHealth']
+) {
+  if (!refreshBridgeHealth) return null;
+  try {
+    return await Promise.race([
+      refreshBridgeHealth(),
+      new Promise<null>((resolve) =>
+        window.setTimeout(() => resolve(null), 3500)
+      ),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
 export async function runBrowserDiagnostics(
   hostReport: DiagnosticReportV1,
   overrides: Partial<BrowserDiagnosticDependencies> = {}
@@ -54,7 +72,8 @@ export async function runBrowserDiagnostics(
     now: () => new Date(),
     pathname: window.location.pathname,
     panelPresent: Boolean(document.getElementById('ageaf-panel-root')),
-    bridgePresent: Boolean(window.ageafBridge?.requestSelection),
+    bridgePresent: Boolean(window.ageafBridge?.refreshHealth),
+    refreshBridgeHealth: window.ageafBridge?.refreshHealth,
     requestSelection: window.ageafBridge?.requestSelection,
     ...overrides,
   };
@@ -63,7 +82,17 @@ export async function runBrowserDiagnostics(
   const projectId =
     pathSegments[0] === 'project' ? pathSegments[1] ?? null : null;
   const onProject = Boolean(projectId);
-  const selection = dependencies.bridgePresent
+  const bridgeHealth = dependencies.bridgePresent
+    ? await probeBridgeHealth(dependencies.refreshBridgeHealth)
+    : null;
+  const bridgeReady = bridgeHealth?.status === 'ready';
+  const mutationReady = Boolean(
+    bridgeReady &&
+      (bridgeHealth.capabilities.insertAtCursor ||
+        bridgeHealth.capabilities.replaceRange ||
+        bridgeHealth.capabilities.replaceInFile)
+  );
+  const selection = bridgeReady
     ? await probeSelection(dependencies.requestSelection)
     : null;
   const activeName = selection?.activeName?.trim() || null;
@@ -93,6 +122,48 @@ export async function runBrowserDiagnostics(
               scope: 'local-safe' as const,
             },
           }),
+      checkedAt,
+    },
+    {
+      schemaVersion: 1,
+      id: 'bridge.protocol',
+      category: 'bridge',
+      requiredness: 'required',
+      status: bridgeReady ? 'ok' : 'broken',
+      summary: bridgeReady
+        ? 'The versioned editor bridge handshake is healthy.'
+        : `The editor bridge handshake is ${
+            bridgeHealth?.status ?? 'unavailable'
+          }.`,
+      evidence: [
+        `status=${bridgeHealth?.status ?? 'unavailable'}`,
+        `protocol=${bridgeHealth?.protocolVersion ?? 'unknown'}`,
+        `cursor=${bridgeHealth?.eventCursor ?? 'unknown'}`,
+      ],
+      ...(bridgeReady
+        ? {}
+        : {
+            repair: {
+              kind: 'manual' as const,
+              summary:
+                bridgeHealth?.status === 'incompatible'
+                  ? 'Reload Iris so the isolated and main-world bridge versions match.'
+                  : 'Wait for the Overleaf editor to load, then reconnect or refresh the tab.',
+              scope: 'local-safe' as const,
+            },
+          }),
+      checkedAt,
+    },
+    {
+      schemaVersion: 1,
+      id: 'bridge.mutation-ready',
+      category: 'bridge',
+      requiredness: 'required',
+      status: mutationReady ? 'ok' : 'broken',
+      summary: mutationReady
+        ? 'The editor bridge reports acknowledged mutation capabilities.'
+        : 'Editor mutations are blocked until bridge capabilities are healthy.',
+      evidence: [`mutationReady=${mutationReady}`],
       checkedAt,
     },
     {

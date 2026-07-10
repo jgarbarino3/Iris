@@ -8954,8 +8954,7 @@ const Panel = () => {
         return await window.ageafBridge.redoEditor();
       }
       if (appliedText && window.ageafBridge?.insertAtCursor) {
-        window.ageafBridge.insertAtCursor(appliedText);
-        return { ok: true };
+        return await window.ageafBridge.insertAtCursor(appliedText);
       }
       return { ok: false, error: 'Redo bridge unavailable' };
     }
@@ -9200,7 +9199,14 @@ const Panel = () => {
         if (!window.ageafBridge) return false;
         const nextText =
           typeof overrideText === 'string' ? overrideText : patchReview.text;
-        window.ageafBridge.insertAtCursor(nextText);
+        const result = await window.ageafBridge.insertAtCursor(nextText);
+        if (!result.ok) {
+          setPatchActionErrors((prev) => ({
+            ...prev,
+            [messageId]: result.error ?? 'Unable to insert text',
+          }));
+          return false;
+        }
         setPatchReviewTextAndStatus(messageId, 'accepted', nextText);
         return true;
       }

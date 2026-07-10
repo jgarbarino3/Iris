@@ -63,14 +63,13 @@ test('Panel anchors summary card between chat and runtime and only when pending 
   );
 });
 
-test('contentScript exposes navigateToFile bridge call', () => {
-  const contents = read('src/iso/contentScript.ts');
+test('central editor adapter exposes bounded navigateToFile bridge call', () => {
+  const contents = read('src/iso/editorAdapter.ts');
 
-  assert.match(contents, /const EDITOR_FILE_NAVIGATE_REQUEST_EVENT = 'ageaf:editor:file-navigate:request';/);
-  assert.match(contents, /const EDITOR_FILE_NAVIGATE_RESPONSE_EVENT = 'ageaf:editor:file-navigate:response';/);
-  assert.match(contents, /function navigateToFile\(name: string\)/);
-  assert.match(contents, /window\.addEventListener\(EDITOR_FILE_NAVIGATE_RESPONSE_EVENT,\s*onFileNavigateResponse as EventListener\)/);
-  assert.match(contents, /navigateToFile,/);
+  assert.match(contents, /navigateRequest: 'ageaf:editor:file-navigate:request'/);
+  assert.match(contents, /navigateResponse: 'ageaf:editor:file-navigate:response'/);
+  assert.match(contents, /async navigateToFile\(name: string\)/);
+  assert.match(contents, /READ_TIMEOUT_MS/);
 });
 
 test('editor bridge listens for file navigation requests', () => {

@@ -4,18 +4,13 @@ const path = require('node:path');
 const test = require('node:test');
 
 test('ISO content script exposes Ageaf editor bridge', () => {
-  const scriptPath = path.join(
-    __dirname,
-    '..',
-    'src',
-    'iso',
-    'contentScript.ts'
-  );
+  const scriptPath = path.join(__dirname, '..', 'src', 'iso', 'editorAdapter.ts');
   const contents = fs.readFileSync(scriptPath, 'utf8');
 
   assert.match(contents, /ageafBridge/);
   assert.match(contents, /ageaf:editor:request/);
   assert.match(contents, /ageaf:editor:response/);
-  assert.match(contents, /ageaf:editor:replace/);
-  assert.match(contents, /ageaf:editor:insert/);
+  assert.match(contents, /ageaf:editor:hello:request/);
+  assert.match(contents, /ageaf:editor:apply:request/);
+  assert.match(contents, /createEditorAdapter/);
 });

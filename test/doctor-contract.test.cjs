@@ -26,6 +26,8 @@ test('Doctor augments host checks with browser, project, bridge, and editor chec
     'browser.overleaf-project',
     'browser.panel',
     'bridge.available',
+    'bridge.protocol',
+    'bridge.mutation-ready',
     'project.identity',
     'file.active',
     'editor.available',

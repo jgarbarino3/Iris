@@ -88,22 +88,22 @@ test('Panel only intercepts review undo shortcuts when review history is next ch
   assert.match(contents, /return;/);
 });
 
-test('Content script exposes undoEditor/redoEditor bridge methods', () => {
+test('Central editor adapter exposes bounded undoEditor/redoEditor bridge methods', () => {
   const scriptPath = path.join(
     __dirname,
     '..',
     'src',
     'iso',
-    'contentScript.ts'
+    'editorAdapter.ts'
   );
   const contents = fs.readFileSync(scriptPath, 'utf8');
 
-  assert.match(contents, /EDITOR_HISTORY_REQUEST_EVENT/);
-  assert.match(contents, /EDITOR_HISTORY_RESPONSE_EVENT/);
-  assert.match(contents, /EDITOR_HISTORY_STATE_EVENT/);
-  assert.match(contents, /undoEditor:\s*\(\)\s*=>\s*Promise<\{ ok: boolean; error\?: string \}>/);
-  assert.match(contents, /redoEditor:\s*\(\)\s*=>\s*Promise<\{ ok: boolean; error\?: string \}>/);
-  assert.match(contents, /getEditorHistoryMarker:\s*\(\)\s*=>\s*currentEditorHistoryMarker/);
+  assert.match(contents, /historyRequest: 'ageaf:editor:history:request'/);
+  assert.match(contents, /historyResponse: 'ageaf:editor:history:response'/);
+  assert.match(contents, /historyState: 'ageaf:editor:history:state'/);
+  assert.match(contents, /async undoEditor\(\)/);
+  assert.match(contents, /async redoEditor\(\)/);
+  assert.match(contents, /getEditorHistoryMarker: \(\) => currentEditorHistoryMarker/);
 });
 
 test('Editor bridge handles undo/redo history requests', () => {

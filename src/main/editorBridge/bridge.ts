@@ -1,11 +1,9 @@
 import { getContentAfterCursor, getContentBeforeCursor, getCmView } from '../helpers';
-import { applyReplacementAtRange, onReplaceContent } from '../eventHandlers';
+import { applyReplacementAtRange } from '../eventHandlers';
 import { MAX_LENGTH_AFTER_CURSOR, MAX_LENGTH_BEFORE_CURSOR } from '../../constants';
 
 const REQUEST_EVENT = 'ageaf:editor:request';
 const RESPONSE_EVENT = 'ageaf:editor:response';
-const REPLACE_EVENT = 'ageaf:editor:replace';
-const INSERT_EVENT = 'ageaf:editor:insert';
 const APPLY_REQUEST_EVENT = 'ageaf:editor:apply:request';
 const APPLY_RESPONSE_EVENT = 'ageaf:editor:apply:response';
 const FILE_REQUEST_EVENT = 'ageaf:editor:file-content:request';
@@ -15,6 +13,15 @@ const FILE_NAVIGATE_RESPONSE_EVENT = 'ageaf:editor:file-navigate:response';
 const HISTORY_REQUEST_EVENT = 'ageaf:editor:history:request';
 const HISTORY_RESPONSE_EVENT = 'ageaf:editor:history:response';
 const HISTORY_STATE_EVENT = 'ageaf:editor:history:state';
+const HELLO_REQUEST_EVENT = 'ageaf:editor:hello:request';
+const HELLO_RESPONSE_EVENT = 'ageaf:editor:hello:response';
+const BRIDGE_READY_EVENT = 'ageaf:editor:ready';
+const EDITOR_BRIDGE_PROTOCOL_VERSION = 1;
+const BRIDGE_INSTANCE_ID =
+  typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let bridgeEventCursor = 0;
 
 interface SelectionRequest {
   requestId: string;
@@ -31,10 +38,6 @@ interface SelectionResponse {
   head: number;
   lineFrom: number;
   lineTo: number;
-}
-
-interface ApplyPatchRequest {
-  text: string;
 }
 
 interface ApplyReplaceRangeRequest {
@@ -56,7 +59,16 @@ interface ApplyReplaceInFileRequest {
   to?: number;
 }
 
-type ApplyRequest = ApplyReplaceRangeRequest | ApplyReplaceInFileRequest;
+interface ApplyInsertAtCursorRequest {
+  requestId: string;
+  kind: 'insertAtCursor';
+  text: string;
+}
+
+type ApplyRequest =
+  | ApplyReplaceRangeRequest
+  | ApplyReplaceInFileRequest
+  | ApplyInsertAtCursorRequest;
 
 interface ApplyResponse {
   requestId: string;
@@ -102,6 +114,64 @@ interface HistoryResponse {
   requestId: string;
   ok: boolean;
   error?: string;
+}
+
+interface HelloRequestV1 {
+  requestId: string;
+  nonce: string;
+  protocolVersion: number;
+}
+
+function currentProjectId() {
+  const segments = window.location.pathname.split('/').filter(Boolean);
+  return segments[0] === 'project' ? segments[1] ?? null : null;
+}
+
+function onHelloRequest(event: Event) {
+  const detail = (event as CustomEvent<HelloRequestV1>).detail;
+  if (!detail?.requestId || !detail?.nonce) return;
+
+  let editorReady = false;
+  let activeFile: string | null = null;
+  let reason: string | undefined;
+  try {
+    getTrackedCmView();
+    activeFile = getActiveTabName();
+    editorReady = true;
+  } catch {
+    reason = 'EDITOR_UNAVAILABLE';
+  }
+
+  const compatible = detail.protocolVersion === EDITOR_BRIDGE_PROTOCOL_VERSION;
+  const capabilities = {
+    selection: editorReady,
+    fileContent: editorReady,
+    navigation: editorReady,
+    insertAtCursor: editorReady,
+    replaceRange: editorReady,
+    replaceInFile: editorReady,
+    history: editorReady,
+  };
+  window.dispatchEvent(
+    new CustomEvent(HELLO_RESPONSE_EVENT, {
+      detail: {
+        requestId: detail.requestId,
+        nonce: detail.nonce,
+        protocolVersion: EDITOR_BRIDGE_PROTOCOL_VERSION,
+        bridgeInstanceId: BRIDGE_INSTANCE_ID,
+        eventCursor: ++bridgeEventCursor,
+        readiness: compatible
+          ? editorReady
+            ? 'ready'
+            : 'degraded'
+          : 'incompatible',
+        reason: compatible ? reason : 'PROTOCOL_MISMATCH',
+        projectId: currentProjectId(),
+        activeFile,
+        capabilities,
+      },
+    })
+  );
 }
 
 let reviewChangeInProgress = false;
@@ -455,7 +525,23 @@ async function onApplyRequest(event: Event) {
       return { from: best, to: best + needle.length };
     };
 
-    if (detail.kind === 'replaceRange') {
+    if (detail.kind === 'insertAtCursor') {
+      if (typeof detail.text !== 'string' || !detail.text) {
+        ok = false;
+        error = 'Invalid insertAtCursor patch';
+      } else {
+        const { head } = view.state.selection.main;
+        reviewChangeInProgress = true;
+        try {
+          view.dispatch({
+            changes: { from: head, to: head, insert: detail.text },
+            selection: { anchor: head + detail.text.length },
+          });
+        } finally {
+          reviewChangeInProgress = false;
+        }
+      }
+    } else if (detail.kind === 'replaceRange') {
       const hasValidRange =
         typeof detail.from === 'number' &&
         Number.isFinite(detail.from) &&
@@ -599,19 +685,25 @@ async function onApplyRequest(event: Event) {
             ok = false;
             error = 'Expected text missing';
           } else {
-            let activated = false;
-            let resolved = resolveReplacementRange();
-
-            if (!resolved.ok && resolved.retryable) {
+            const targetName = normalizeFileName(detail.filePath);
+            let activated = normalizeFileName(getActiveTabName() ?? '') === targetName;
+            if (!activated) {
               try {
                 await activateTargetFile();
-                activated = true;
-                resolved = resolveReplacementRange();
+                activated = normalizeFileName(getActiveTabName() ?? '') === targetName;
+                if (!activated) {
+                  ok = false;
+                  error = `Open ${targetName} in Overleaf and retry.`;
+                }
               } catch (err) {
                 ok = false;
                 error = err instanceof Error ? err.message : String(err);
               }
             }
+
+            let resolved = ok
+              ? resolveReplacementRange()
+              : ({ ok: false, error: error ?? 'Target file unavailable', retryable: false } as const);
 
             if (ok && resolved.ok) {
               const current = view.state.sliceDoc(resolved.from, resolved.to);
@@ -703,38 +795,6 @@ async function onApplyRequest(event: Event) {
   window.dispatchEvent(new CustomEvent(APPLY_RESPONSE_EVENT, { detail: response }));
 }
 
-function onReplaceSelection(event: Event) {
-  const detail = (event as CustomEvent<ApplyPatchRequest>).detail;
-  if (!detail?.text) return;
-
-  const view = getTrackedCmView();
-  const { from, to } = view.state.selection.main;
-
-  onReplaceContent(
-    new CustomEvent('copilot:editor:replace', {
-      detail: { content: detail.text, from, to }
-    })
-  );
-}
-
-function onInsertAtCursor(event: Event) {
-  const detail = (event as CustomEvent<ApplyPatchRequest>).detail;
-  if (!detail?.text) return;
-
-  const view = getTrackedCmView();
-  const { head } = view.state.selection.main;
-  const selection = { anchor: head + detail.text.length };
-
-  reviewChangeInProgress = true;
-  try {
-    view.dispatch({
-      changes: { from: head, to: head, insert: detail.text },
-      selection,
-    });
-  } finally {
-    reviewChangeInProgress = false;
-  }
-}
 
 async function onFileNavigateRequest(event: Event) {
   const detail = (event as CustomEvent<FileNavigateRequest>).detail;
@@ -826,8 +886,16 @@ export function registerEditorBridge() {
   window.addEventListener(REQUEST_EVENT, onSelectionRequest as EventListener);
   window.addEventListener(FILE_REQUEST_EVENT, onFileContentRequest as EventListener);
   window.addEventListener(APPLY_REQUEST_EVENT, onApplyRequest as EventListener);
-  window.addEventListener(REPLACE_EVENT, onReplaceSelection as EventListener);
-  window.addEventListener(INSERT_EVENT, onInsertAtCursor as EventListener);
   window.addEventListener(FILE_NAVIGATE_REQUEST_EVENT, onFileNavigateRequest as EventListener);
   window.addEventListener(HISTORY_REQUEST_EVENT, onHistoryRequest as EventListener);
+  window.addEventListener(HELLO_REQUEST_EVENT, onHelloRequest as EventListener);
+  window.dispatchEvent(
+    new CustomEvent(BRIDGE_READY_EVENT, {
+      detail: {
+        protocolVersion: EDITOR_BRIDGE_PROTOCOL_VERSION,
+        bridgeInstanceId: BRIDGE_INSTANCE_ID,
+        eventCursor: ++bridgeEventCursor,
+      },
+    })
+  );
 }
