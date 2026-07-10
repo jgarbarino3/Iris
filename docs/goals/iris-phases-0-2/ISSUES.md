@@ -21,6 +21,10 @@ Status values: `pending`, `active`, `verified`, `blocked`, `superseded`.
 | P2-08 | pending  | Delete/demote direct writers and in-memory edit history; run displaced-path audit                                    | Production cutover / static audit                 | P2-07        |
 | P2-09 | pending  | Pass full automated matrix and private live Overleaf smoke; close evidence                                           | Goal evidence / target perspective                | P2-08        |
 
+## Execution checkpoints
+
+- A0 verified: the Ubuntu compaction race now uses an injected, explicitly gated Claude runtime test double; focused and complete `npm run verify` gates pass locally. P1-03 remains the active issue.
+
 ## Parallelism rules
 
 - Implementation remains main-agent-owned and sequential where listed.

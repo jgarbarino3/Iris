@@ -38,6 +38,15 @@ This file records target-perspective proof, not just implementation claims.
 - Insertion truth is reconciled: `insertAtCursor` output remains an actionable pending review card and cannot degrade to a copy-only assistant code block.
 - P1-01 changed package metadata, one baseline test, and goal evidence only; it did not change production runtime behavior.
 
+### A0 — CI compaction race repair
+
+- Remote failure inspected from GitHub Actions run `29111994918`, job `86426303501`: `host/test/codex-compact-timeout.test.ts` failed because Ubuntu completed the first Claude compaction before the fixed 100 ms delay elapsed, so the second call never observed the active-compaction lock.
+- The test now injects a contract-correct `runClaudeText` double with explicit `started` and `release` barriers. The first call cannot finish before the assertion, and the second call must reject while the lock is held; no installed Claude CLI or wall-clock delay is involved.
+- `sendCompactCommand` accepts a narrow optional dependency seam for the Claude text runner while retaining the production implementation as the default.
+- Focused `npm exec -- tsx --test test/codex-compact-timeout.test.ts`: 3 passed, 0 failed.
+- Host `npm run typecheck`: passed.
+- Complete root `npm run verify`: passed with 374 root tests, 308 host tests, both formatting/typecheck/build gates, and 1 Playwright browser smoke.
+
 ### P1-02 — CI and deterministic browser baseline
 
 - Root `package.json` now exposes `typecheck`, `format:check`, `test:browser`, and one `verify` aggregator; the host exposes matching `typecheck`, `format:check`, and `verify` commands.

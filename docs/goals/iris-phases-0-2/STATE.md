@@ -20,6 +20,7 @@
 - Playwright `1.61.1` is pinned; the MV3 fixture loads the unpacked production build in bundled Chromium, routes an Overleaf project URL to a deterministic page, verifies the Ageaf service worker, panel injection, layout wrapping, and zero page errors.
 - The browser gate caught Webpack automatic public-path inference failing in a content script; `config/webpack.common.js` now defers chunk ownership to the existing `chrome.runtime.getURL` helper and the regression is covered by both Node and browser tests.
 - The current dirty tree passes 374 root tests, root formatting/typecheck/build, 308 host tests, host formatting/typecheck/build, and the Playwright smoke.
+- A0 is verified locally: the concurrent Claude compaction test now uses an injected synchronization barrier instead of depending on CLI availability or timing, and the complete `npm run verify` gate passes.
 - Insertion test truth is reconciled around actionable `insertAtCursor` review cards; copy-only fallback is explicitly rejected.
 - Production dependency-audit reachability is recorded in `EVIDENCE.md`; no broad dependency upgrade was mixed into the baseline slice.
 - Existing unrelated host/tooling changes remain preserved and were not rewritten by P1-01 or P1-02.

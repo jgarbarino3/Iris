@@ -48,31 +48,37 @@ test('Claude compact rejects concurrent compaction', async () => {
   const mockEvents: any[] = [];
   const emitEvent = (event: any) => mockEvents.push(event);
 
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  let releaseFirst!: () => void;
+  const release = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const runClaudeText = async () => {
+    signalStarted();
+    await release;
+    return { resultText: 'compacted', emittedPatchFiles: new Set<string>() };
+  };
+
   const payload = {
     runtime: {
       claude: {
         conversationId,
-        cliPath: process.env.CLAUDE_CLI_PATH || 'claude',
+        cliPath: process.execPath,
       },
     },
   };
 
-  // First compact will timeout/fail but will lock
-  const firstCompact = sendCompactCommand('claude', payload, emitEvent).catch(() => {
-    // Expected to fail/timeout
-  });
+  const firstCompact = sendCompactCommand('claude', payload, emitEvent, { runClaudeText });
+  await started;
 
-  // Give first compact time to acquire lock
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await assert.rejects(
+    sendCompactCommand('claude', payload, emitEvent, { runClaudeText }),
+    /already in progress/i
+  );
 
-  // Second concurrent compact should fail immediately
-  try {
-    await sendCompactCommand('claude', payload, emitEvent);
-    assert.fail('Should have thrown concurrent compaction error');
-  } catch (error: any) {
-    assert.match(error.message, /already in progress/i);
-  }
-
-  // Wait for first to complete/timeout
+  releaseFirst();
   await firstCompact;
 });

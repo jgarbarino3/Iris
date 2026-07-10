@@ -12,6 +12,10 @@ import type { JobEvent } from '../types.js';
 
 type EmitEvent = (event: JobEvent) => void;
 
+export type CompactCommandDependencies = {
+  runClaudeText: typeof runClaudeText;
+};
+
 type CodexApprovalPolicy = 'untrusted' | 'on-request' | 'on-failure' | 'never';
 
 function normalizeApprovalPolicy(value: unknown): CodexApprovalPolicy {
@@ -53,11 +57,17 @@ const COMPACT_TIMEOUT_MS = 60000;
 export async function sendCompactCommand(
   provider: 'claude' | 'codex',
   payload: any,
-  emitEvent: EmitEvent
+  emitEvent: EmitEvent,
+  dependencies: Partial<CompactCommandDependencies> = {}
 ): Promise<void> {
   if (provider === 'claude') {
     const debugCliEvents = Boolean(payload?.userSettings?.debugCliEvents);
-    await sendClaudeCompact(payload.runtime?.claude, emitEvent, debugCliEvents);
+    await sendClaudeCompact(
+      payload.runtime?.claude,
+      emitEvent,
+      debugCliEvents,
+      dependencies.runClaudeText ?? runClaudeText
+    );
   } else {
     const debugCliEvents = Boolean(payload?.userSettings?.debugCliEvents);
     await sendCodexCompact(payload.runtime?.codex, emitEvent, debugCliEvents);
@@ -67,7 +77,8 @@ export async function sendCompactCommand(
 async function sendClaudeCompact(
   runtime: ClaudeRuntimeConfig | undefined,
   emitEvent: EmitEvent,
-  debugCliEvents: boolean
+  debugCliEvents: boolean,
+  runClaudeTextImpl: typeof runClaudeText
 ): Promise<void> {
   const conversationId = runtime?.conversationId ?? 'unknown';
   const toolId = `compaction-${Date.now()}`;
@@ -116,7 +127,7 @@ async function sendClaudeCompact(
     };
 
     // Send "/compact" as a regular prompt with timeout
-    const compactPromise = runClaudeText({
+    const compactPromise = runClaudeTextImpl({
       prompt: '/compact',
       emitEvent: compactEmit,
       runtime,
