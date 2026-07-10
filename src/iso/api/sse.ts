@@ -32,9 +32,12 @@ function parseEvent(block: string): JobEvent | null {
 export async function streamEvents(
   url: string,
   onEvent: (event: JobEvent) => void,
-  options?: { signal?: AbortSignal }
+  options?: { signal?: AbortSignal; headers?: HeadersInit }
 ) {
-  const response = await fetch(url, { signal: options?.signal });
+  const response = await fetch(url, {
+    signal: options?.signal,
+    headers: options?.headers,
+  });
   if (!response.ok || !response.body) {
     throw new Error(`Failed to stream events (${response.status})`);
   }

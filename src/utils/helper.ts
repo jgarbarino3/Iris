@@ -1,5 +1,5 @@
-import { LOCAL_STORAGE_KEY_OPTIONS } from "../constants";
-import { Options } from "../types";
+import { LOCAL_STORAGE_KEY_OPTIONS } from '../constants';
+import { Options } from '../types';
 
 let lastKnownOptions: Options | null = null;
 
@@ -34,11 +34,14 @@ const LEGACY_AUTH_KEYS = [
   'openaiEnvVars',
 ];
 
-function applyOptionDefaults(input: Options): { options: Options; hadLegacyKeys: boolean } {
+function applyOptionDefaults(input: Options): {
+  options: Options;
+  requiresPersistence: boolean;
+} {
   const options = { ...(input ?? {}) } as Options;
 
-  // Strip legacy auth fields (keys now live in host .env)
-  const hadLegacyKeys = LEGACY_AUTH_KEYS.some((k) => k in options);
+  // Strip legacy auth fields (keys now live in host .env).
+  let requiresPersistence = LEGACY_AUTH_KEYS.some((k) => k in options);
   for (const k of LEGACY_AUTH_KEYS) delete (options as any)[k];
 
   if (options.transport !== 'http' && options.transport !== 'native') {
@@ -46,6 +49,20 @@ function applyOptionDefaults(input: Options): { options: Options; hadLegacyKeys:
   }
   if (options.transport !== 'native' && !options.hostUrl) {
     options.hostUrl = 'http://127.0.0.1:3210';
+  }
+  const currentExtensionId =
+    typeof chrome !== 'undefined' && chrome.runtime?.id
+      ? chrome.runtime.id
+      : null;
+  if (
+    currentExtensionId &&
+    options.hostPairedExtensionId &&
+    options.hostPairedExtensionId !== currentExtensionId
+  ) {
+    delete options.hostAuthToken;
+    delete options.hostTokenId;
+    delete options.hostPairedExtensionId;
+    requiresPersistence = true;
   }
   options.claudeSessionScope = 'project';
   if (options.claudeYoloMode === undefined) options.claudeYoloMode = true;
@@ -58,8 +75,9 @@ function applyOptionDefaults(input: Options): { options: Options; hadLegacyKeys:
   ) {
     options.openaiApprovalPolicy = 'never';
   }
-  
-  if (options.enableCommandBlocklist === undefined) options.enableCommandBlocklist = true;
+
+  if (options.enableCommandBlocklist === undefined)
+    options.enableCommandBlocklist = true;
   if (!options.blockedCommandsUnix) {
     options.blockedCommandsUnix = 'rm -rf\nchmod 777\nchmod -R 777';
   }
@@ -78,9 +96,10 @@ function applyOptionDefaults(input: Options): { options: Options; hadLegacyKeys:
 
   if (!options.skillTrustMode) options.skillTrustMode = 'verified';
 
-  if (options.surroundingContextLimit === undefined) options.surroundingContextLimit = 5000;
+  if (options.surroundingContextLimit === undefined)
+    options.surroundingContextLimit = 5000;
 
-  return { options, hadLegacyKeys };
+  return { options, requiresPersistence };
 }
 
 export async function getOptions(): Promise<Options> {
@@ -98,10 +117,12 @@ export async function getOptions(): Promise<Options> {
 
   try {
     const data = await chrome.storage.local.get([LOCAL_STORAGE_KEY_OPTIONS]);
-    const { options, hadLegacyKeys } = applyOptionDefaults((data[LOCAL_STORAGE_KEY_OPTIONS] ?? {}) as Options);
+    const { options, requiresPersistence } = applyOptionDefaults(
+      (data[LOCAL_STORAGE_KEY_OPTIONS] ?? {}) as Options
+    );
 
-    // Immediately purge legacy auth fields from persistent storage.
-    if (hadLegacyKeys) {
+    // Immediately purge migrated or extension-bound secrets from persistent storage.
+    if (requiresPersistence) {
       chrome.storage.local.set({ [LOCAL_STORAGE_KEY_OPTIONS]: options }).catch(() => {});
     }
 
@@ -110,7 +131,10 @@ export async function getOptions(): Promise<Options> {
     cacheTimestamp = Date.now();
     return options;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('Extension context invalidated')) {
+    if (
+      error instanceof Error &&
+      error.message.includes('Extension context invalidated')
+    ) {
       return applyOptionDefaults(lastKnownOptions ?? {}).options;
     }
     throw error;

@@ -1,5 +1,6 @@
 import { getClaudeRuntimeStatus } from '../runtimes/claude/client.js';
 import { getPiRuntimeStatus } from '../runtimes/pi/client.js';
+import { isLoopbackHost } from '../transport/loopback.js';
 import type {
   DiagnosticCheckV1,
   DiagnosticReportV1,
@@ -13,16 +14,6 @@ export type HostDiagnosticDependencies = {
   claudeConfigured: boolean;
   piConfigured: boolean;
 };
-
-function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  return (
-    normalized === '127.0.0.1' ||
-    normalized === 'localhost' ||
-    normalized === '::1' ||
-    normalized === '[::1]'
-  );
-}
 
 function overallStatus(checks: DiagnosticCheckV1[]): DiagnosticStatusV1 {
   if (

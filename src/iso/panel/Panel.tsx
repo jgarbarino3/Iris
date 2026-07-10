@@ -30,6 +30,7 @@ import {
   fetchHostHealth,
   fetchDiagnostics,
   openAttachmentDialog,
+  pairLocalHost,
   respondToJobRequest,
   streamJobEvents,
   updateClaudeRuntimePreferences,
@@ -978,6 +979,9 @@ const Panel = () => {
   const [doctorReport, setDoctorReport] = useState<DiagnosticReportV1 | null>(null);
   const [doctorBusy, setDoctorBusy] = useState(false);
   const [doctorError, setDoctorError] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState('');
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingMessage, setPairingMessage] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -1704,6 +1708,51 @@ const Panel = () => {
         error instanceof Error ? error.message : 'native check failed'
       );
     }
+  };
+
+  const pairHttpHost = async () => {
+    if (!settings || pairingBusy) return;
+    const code = pairingCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setPairingMessage('Enter the six-digit code shown by the Iris host.');
+      return;
+    }
+    setPairingBusy(true);
+    setPairingMessage(null);
+    try {
+      const response = await pairLocalHost(settings, code);
+      const next: Options = {
+        ...settings,
+        hostAuthToken: response.token,
+        hostTokenId: response.tokenId,
+        hostPairedExtensionId: chrome.runtime.id,
+      };
+      await chrome.storage.local.set({ [LOCAL_STORAGE_KEY_OPTIONS]: next });
+      invalidateOptionsCache();
+      setSettings(next);
+      setPairingCode('');
+      setPairingMessage('Local host paired.');
+      void checkConnectionHealth();
+    } catch (error) {
+      setPairingMessage(
+        error instanceof Error ? error.message : 'Local host pairing failed'
+      );
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const forgetHttpPairing = async () => {
+    if (!settings || pairingBusy) return;
+    const next: Options = { ...settings };
+    delete next.hostAuthToken;
+    delete next.hostTokenId;
+    delete next.hostPairedExtensionId;
+    await chrome.storage.local.set({ [LOCAL_STORAGE_KEY_OPTIONS]: next });
+    invalidateOptionsCache();
+    setSettings(next);
+    setPairingMessage('Local pairing forgotten. Run host auth:reset to revoke it.');
+    setDoctorReport(null);
   };
 
   const runDoctor = async () => {
@@ -11376,6 +11425,54 @@ const Panel = () => {
                             }
                             placeholder="http://127.0.0.1:3210"
                           />
+                          <label
+                            class="ageaf-settings__label"
+                            for="ageaf-pairing-code"
+                          >
+                            Pairing code
+                          </label>
+                          <input
+                            id="ageaf-pairing-code"
+                            class="ageaf-settings__input"
+                            type="password"
+                            inputMode="numeric"
+                            maxLength={6}
+                            value={pairingCode}
+                            onInput={(event) => {
+                              const value = (
+                                event.target as HTMLInputElement
+                              ).value.replace(/\D/g, '').slice(0, 6);
+                              setPairingCode(value);
+                              setPairingMessage(null);
+                            }}
+                            placeholder="Six-digit host code"
+                            autocomplete="one-time-code"
+                          />
+                          <button
+                            type="button"
+                            class="ageaf-settings__button"
+                            onClick={() => void pairHttpHost()}
+                            disabled={pairingBusy}
+                          >
+                            {pairingBusy ? 'Pairing…' : 'Pair Local Host'}
+                          </button>
+                          {settings.hostTokenId ? (
+                            <button
+                              type="button"
+                              class="ageaf-settings__button"
+                              onClick={() => void forgetHttpPairing()}
+                              disabled={pairingBusy}
+                            >
+                              Forget locally
+                            </button>
+                          ) : null}
+                          {pairingMessage ? (
+                            <p class="ageaf-settings__hint">{pairingMessage}</p>
+                          ) : settings.hostTokenId ? (
+                            <p class="ageaf-settings__hint">
+                              Local host paired for this extension installation.
+                            </p>
+                          ) : null}
                         </>
                       ) : (
                         <>

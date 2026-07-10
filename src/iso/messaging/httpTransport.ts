@@ -1,6 +1,7 @@
 import type { Options } from '../../types';
 import type { Transport } from './transport';
 import {
+  pairLocalHost as httpPairLocalHost,
   createJob as httpCreateJob,
   streamJobEvents as httpStreamJobEvents,
   respondToJobRequest as httpRespondToJobRequest,
@@ -22,10 +23,10 @@ import {
 
 export function httpTransport(options: Options): Transport {
   return {
-    createJob: (
-      payload: JobPayload,
-      request?: { signal?: AbortSignal }
-    ) => httpCreateJob(options, payload, request),
+    pairLocalHost: (code: string) => httpPairLocalHost(options, code),
+
+    createJob: (payload: JobPayload, request?: { signal?: AbortSignal }) =>
+      httpCreateJob(options, payload, request),
 
     streamJobEvents: (
       jobId: string,
@@ -43,27 +44,28 @@ export function httpTransport(options: Options): Transport {
 
     fetchCodexRuntimeMetadata: () => httpFetchCodexRuntimeMetadata(options),
 
-    updateClaudeRuntimePreferences: (
-      payload: { model?: string | null; thinkingMode?: string | null }
-    ) => httpUpdateClaudeRuntimePreferences(options, payload),
+    updateClaudeRuntimePreferences: (payload: {
+      model?: string | null;
+      thinkingMode?: string | null;
+    }) => httpUpdateClaudeRuntimePreferences(options, payload),
 
-    fetchClaudeRuntimeContextUsage: (
-      conversationId?: string | null
-    ) => httpFetchClaudeRuntimeContextUsage(options, conversationId),
+    fetchClaudeRuntimeContextUsage: (conversationId?: string | null) =>
+      httpFetchClaudeRuntimeContextUsage(options, conversationId),
 
-    fetchCodexRuntimeContextUsage: (
-      payload?: { threadId?: string }
-    ) => httpFetchCodexRuntimeContextUsage(options, payload),
+    fetchCodexRuntimeContextUsage: (payload?: { threadId?: string }) =>
+      httpFetchCodexRuntimeContextUsage(options, payload),
 
     fetchPiRuntimeMetadata: () => httpFetchPiRuntimeMetadata(options),
 
-    updatePiRuntimePreferences: (
-      payload: { provider?: string | null; model?: string | null; thinkingLevel?: string | null; skillTrustMode?: string | null }
-    ) => httpUpdatePiRuntimePreferences(options, payload),
+    updatePiRuntimePreferences: (payload: {
+      provider?: string | null;
+      model?: string | null;
+      thinkingLevel?: string | null;
+      skillTrustMode?: string | null;
+    }) => httpUpdatePiRuntimePreferences(options, payload),
 
-    fetchPiRuntimeContextUsage: (
-      conversationId?: string
-    ) => httpFetchPiRuntimeContextUsage(options, conversationId),
+    fetchPiRuntimeContextUsage: (conversationId?: string) =>
+      httpFetchPiRuntimeContextUsage(options, conversationId),
 
     fetchHostHealth: () => httpFetchHostHealth(options),
 
@@ -77,9 +79,7 @@ export function httpTransport(options: Options): Transport {
       payload: Parameters<typeof httpValidateAttachmentEntries>[1]
     ) => httpValidateAttachmentEntries(options, payload),
 
-    deleteSession: (
-      provider: 'claude' | 'codex' | 'pi',
-      sessionId: string
-    ) => httpDeleteSession(options, provider, sessionId),
+    deleteSession: (provider: 'claude' | 'codex' | 'pi', sessionId: string) =>
+      httpDeleteSession(options, provider, sessionId),
   };
 }

@@ -3,6 +3,79 @@ import type { DiagnosticReportV1 } from '../diagnostics/types';
 
 import { streamEvents, JobEvent } from './sse';
 
+const EXTENSION_ID_HEADER = 'X-Iris-Extension-Id';
+
+function loopbackHostUrl(options: Options): URL {
+  if (!options.hostUrl) {
+    throw new Error('Host URL not configured');
+  }
+  const url = new URL(options.hostUrl);
+  const hostname = url.hostname.toLowerCase();
+  if (
+    url.protocol !== 'http:' ||
+    !['127.0.0.1', 'localhost', '[::1]', '::1'].includes(hostname)
+  ) {
+    throw new Error('Local host URL must use HTTP on a loopback address');
+  }
+  return url;
+}
+
+function authenticatedHeaders(
+  options: Options,
+  headers?: HeadersInit
+): Headers {
+  const result = new Headers(headers);
+  const token = options.hostAuthToken?.trim();
+  if (token) {
+    const extensionInstanceId = options.hostPairedExtensionId?.trim();
+    if (!extensionInstanceId) {
+      throw new Error('Local host pairing is incomplete');
+    }
+    result.set('Authorization', `Bearer ${token}`);
+    result.set(EXTENSION_ID_HEADER, extensionInstanceId);
+  }
+  return result;
+}
+
+function hostFetch(options: Options, input: string, init: RequestInit = {}) {
+  const url = new URL(input);
+  const configuredHost = loopbackHostUrl(options);
+  if (url.origin !== configuredHost.origin) {
+    throw new Error(
+      'Local host request origin does not match the configured host'
+    );
+  }
+  return fetch(input, {
+    ...init,
+    headers: authenticatedHeaders(options, init.headers),
+  });
+}
+
+export type PairResponseV1 = {
+  tokenId: string;
+  token: string;
+};
+
+export async function pairLocalHost(
+  options: Options,
+  code: string
+): Promise<PairResponseV1> {
+  if (!options.hostUrl) {
+    throw new Error('Host URL not configured');
+  }
+  const hostUrl = loopbackHostUrl(options);
+  const extensionInstanceId = chrome.runtime.id;
+  const response = await fetch(new URL('/v1/pair', hostUrl).toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, extensionInstanceId }),
+  });
+  if (!response.ok) {
+    throw new Error(`Local host pairing failed (${response.status})`);
+  }
+  return response.json() as Promise<PairResponseV1>;
+}
+
 export type JobPayload = {
   provider: 'claude' | 'codex' | 'pi';
   action: string;
@@ -81,12 +154,16 @@ export async function createJob(
     'Content-Type': 'application/json',
   };
 
-  const response = await fetch(new URL('/v1/jobs', options.hostUrl).toString(), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-    signal: request?.signal,
-  });
+  const response = await hostFetch(
+    options,
+    new URL('/v1/jobs', options.hostUrl).toString(),
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: request?.signal,
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`Job request failed (${response.status})`);
@@ -106,7 +183,10 @@ export async function streamJobEvents(
   }
 
   const url = new URL(`/v1/jobs/${jobId}/events`, options.hostUrl).toString();
-  await streamEvents(url, onEvent, { signal: request?.signal });
+  await streamEvents(url, onEvent, {
+    signal: request?.signal,
+    headers: authenticatedHeaders(options),
+  });
 }
 
 export async function respondToJobRequest(
@@ -119,7 +199,8 @@ export async function respondToJobRequest(
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL(`/v1/jobs/${jobId}/respond`, options.hostUrl).toString(),
     {
       method: 'POST',
@@ -142,7 +223,11 @@ export type ClaudeRuntimeMetadata = {
   models: Array<{ value: string; displayName: string; description: string }>;
   currentModel: string | null;
   modelSource?: string;
-  thinkingModes: Array<{ id: string; label: string; maxThinkingTokens: number | null }>;
+  thinkingModes: Array<{
+    id: string;
+    label: string;
+    maxThinkingTokens: number | null;
+  }>;
   currentThinkingMode: string;
   maxThinkingTokens: number | null;
 };
@@ -152,7 +237,8 @@ export async function fetchClaudeRuntimeMetadata(options: Options) {
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/claude/metadata', options.hostUrl).toString()
   );
 
@@ -168,7 +254,10 @@ export type CodexRuntimeMetadata = {
     value: string;
     displayName: string;
     description: string;
-    supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>;
+    supportedReasoningEfforts: Array<{
+      reasoningEffort: string;
+      description: string;
+    }>;
     defaultReasoningEffort: string;
     isDefault: boolean;
   }>;
@@ -181,7 +270,8 @@ export async function fetchCodexRuntimeMetadata(options: Options) {
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/codex/metadata', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -217,7 +307,8 @@ export async function openAttachmentDialog(
   if (!options.hostUrl) {
     throw new Error('Host URL not configured');
   }
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/attachments/open', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -244,13 +335,18 @@ export async function validateAttachmentEntries(
       lineCount?: number;
     }>;
     paths?: string[];
-    limits?: { maxFiles?: number; maxFileBytes?: number; maxTotalBytes?: number };
+    limits?: {
+      maxFiles?: number;
+      maxFileBytes?: number;
+      maxTotalBytes?: number;
+    };
   }
 ) {
   if (!options.hostUrl) {
     throw new Error('Host URL not configured');
   }
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/attachments/validate', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -285,13 +381,18 @@ export async function validateDocumentEntries(
       path?: string;
       size: number;
     }>;
-    limits?: { maxFiles?: number; maxFileBytes?: number; maxTotalBytes?: number };
+    limits?: {
+      maxFiles?: number;
+      maxFileBytes?: number;
+      maxTotalBytes?: number;
+    };
   }
 ) {
   if (!options.hostUrl) {
     throw new Error('Host URL not configured');
   }
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/attachments/validate-documents', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -316,7 +417,8 @@ export async function updateClaudeRuntimePreferences(
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/claude/preferences', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -360,7 +462,7 @@ export async function fetchClaudeRuntimeContextUsage(
   if (conversationId) {
     url.searchParams.set('conversationId', conversationId);
   }
-  const response = await fetch(url.toString());
+  const response = await hostFetch(options, url.toString());
 
   if (!response.ok) {
     throw new Error(`Runtime context request failed (${response.status})`);
@@ -385,7 +487,8 @@ export async function fetchCodexRuntimeContextUsage(
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/codex/context', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -409,7 +512,10 @@ export async function fetchDiagnostics(options: Options) {
   if (!options.hostUrl) {
     throw new Error('Host URL not configured');
   }
-  const response = await fetch(new URL('/v1/diagnostics', options.hostUrl).toString());
+  const response = await hostFetch(
+    options,
+    new URL('/v1/diagnostics', options.hostUrl).toString()
+  );
   if (!response.ok) {
     throw new Error(`Diagnostics request failed (${response.status})`);
   }
@@ -417,10 +523,8 @@ export async function fetchDiagnostics(options: Options) {
 }
 
 export async function fetchHostHealth(options: Options) {
-  if (!options.hostUrl) {
-    throw new Error('Host URL not configured');
-  }
-  const response = await fetch(new URL('/v1/health', options.hostUrl).toString());
+  const hostUrl = loopbackHostUrl(options);
+  const response = await fetch(new URL('/v1/health', hostUrl).toString());
   if (!response.ok) {
     throw new Error(`Host health request failed (${response.status})`);
   }
@@ -436,6 +540,10 @@ export type HostHealthResponse = {
   };
   pi?: {
     configured?: boolean;
+  };
+  pairing?: {
+    required?: boolean;
+    paired?: boolean;
   };
 };
 
@@ -459,7 +567,8 @@ export async function fetchPiRuntimeMetadata(options: Options) {
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/pi/metadata', options.hostUrl).toString()
   );
 
@@ -472,13 +581,19 @@ export async function fetchPiRuntimeMetadata(options: Options) {
 
 export async function updatePiRuntimePreferences(
   options: Options,
-  payload: { provider?: string | null; model?: string | null; thinkingLevel?: string | null; skillTrustMode?: string | null }
+  payload: {
+    provider?: string | null;
+    model?: string | null;
+    thinkingLevel?: string | null;
+    skillTrustMode?: string | null;
+  }
 ) {
   if (!options.hostUrl) {
     throw new Error('Host URL not configured');
   }
 
-  const response = await fetch(
+  const response = await hostFetch(
+    options,
     new URL('/v1/runtime/pi/preferences', options.hostUrl).toString(),
     {
       method: 'POST',
@@ -488,7 +603,9 @@ export async function updatePiRuntimePreferences(
   );
 
   if (!response.ok) {
-    throw new Error(`Pi runtime preferences request failed (${response.status})`);
+    throw new Error(
+      `Pi runtime preferences request failed (${response.status})`
+    );
   }
 
   return response.json() as Promise<{
@@ -520,7 +637,7 @@ export async function fetchPiRuntimeContextUsage(
   if (conversationId) {
     url.searchParams.set('conversationId', conversationId);
   }
-  const response = await fetch(url.toString());
+  const response = await hostFetch(options, url.toString());
 
   if (!response.ok) {
     throw new Error(`Pi runtime context request failed (${response.status})`);
@@ -538,13 +655,18 @@ export async function deleteSession(
     throw new Error('Host URL not configured');
   }
 
-  const url = new URL(`/v1/sessions/${provider}/${sessionId}`, options.hostUrl).toString();
-  const response = await fetch(url, {
+  const url = new URL(
+    `/v1/sessions/${provider}/${sessionId}`,
+    options.hostUrl
+  ).toString();
+  const response = await hostFetch(options, url, {
     method: 'DELETE',
   });
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new Error(`Session deletion failed (${response.status})${text ? `: ${text}` : ''}`);
+    throw new Error(
+      `Session deletion failed (${response.status})${text ? `: ${text}` : ''}`
+    );
   }
 }

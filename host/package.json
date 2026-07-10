@@ -12,10 +12,11 @@
     "start": "node dist/start.js",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "format:check": "prettier --check --ignore-unknown \"package.json\" \"tsconfig.json\" \"src/diagnostics/**/*.ts\" \"src/routes/diagnostics.ts\" \"src/doctor.ts\" \"test/diagnostics.test.ts\"",
+    "format:check": "prettier --check --ignore-unknown \"package.json\" \"tsconfig.json\" \"src/auth/**/*.ts\" \"src/diagnostics/**/*.ts\" \"src/transport/**/*.ts\" \"src/routes/diagnostics.ts\" \"src/routes/health.ts\" \"src/routes/pairing.ts\" \"src/doctor.ts\" \"src/native.ts\" \"src/nativeMessaging.ts\" \"src/nativeMessaging/protocol.ts\" \"src/server.ts\" \"src/start.ts\" \"test/cors.test.ts\" \"test/diagnostics.test.ts\" \"test/loopback.test.ts\" \"test/native-messaging-host.test.ts\" \"test/native-messaging-protocol.test.ts\" \"test/pairing.test.ts\"",
     "verify": "npm run format:check && npm run typecheck && npm test && npm run build",
     "native": "tsx src/native.ts",
-    "doctor": "tsx src/doctor.ts"
+    "doctor": "tsx src/doctor.ts",
+    "auth:reset": "tsx src/auth/reset.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.14",

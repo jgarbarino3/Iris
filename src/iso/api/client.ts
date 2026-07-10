@@ -30,6 +30,13 @@ export type {
   PiRuntimeMetadata,
 };
 
+export async function pairLocalHost(
+  options: Options,
+  code: string
+): Promise<{ tokenId: string; token: string }> {
+  return createTransport(options).pairLocalHost(code);
+}
+
 export async function createJob(
   options: Options,
   payload: JobPayload,

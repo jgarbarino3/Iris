@@ -14,7 +14,7 @@ test('helper.ts strips legacy auth keys from Options', () => {
   assert.match(contents, /claudeLoadUserSettings/);
   assert.match(contents, /openaiCodexCliPath/);
   assert.match(contents, /openaiEnvVars/);
-  assert.match(contents, /hadLegacyKeys/);
+  assert.match(contents, /requiresPersistence/);
 });
 
 test('getOptions auto-purges legacy keys from chrome.storage', () => {
@@ -22,8 +22,17 @@ test('getOptions auto-purges legacy keys from chrome.storage', () => {
   const contents = fs.readFileSync(helperPath, 'utf8');
 
   // getOptions must write back when legacy keys are detected
-  assert.match(contents, /if\s*\(hadLegacyKeys\)/);
+  assert.match(contents, /if\s*\(requiresPersistence\)/);
   assert.match(contents, /chrome\.storage\.local\.set/);
+});
+
+test('getOptions purges pairing secrets when the extension identity changes', () => {
+  const helperPath = path.join(__dirname, '..', 'src', 'utils', 'helper.ts');
+  const contents = fs.readFileSync(helperPath, 'utf8');
+
+  assert.match(contents, /hostPairedExtensionId\s*!==\s*currentExtensionId/);
+  assert.match(contents, /delete options\.hostAuthToken/);
+  assert.match(contents, /requiresPersistence\s*=\s*true/);
 });
 
 test('Options type does not contain legacy auth fields', () => {

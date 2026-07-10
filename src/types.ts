@@ -3,16 +3,16 @@
 export interface EditorContent {
   cmView: {
     view: EditorContentView;
-  }
+  };
 }
 
 export interface EditorContentView {
-  state: EditorContentState,
+  state: EditorContentState;
   dispatch: (changes: any) => void;
   coordsAtPos: (pos: number) => DOMRect | null;
   scrollDOM: HTMLElement;
   contentDOM: HTMLElement;
-};
+}
 
 export interface EditorContentState {
   doc: {
@@ -37,11 +37,14 @@ export interface EditorContentState {
     };
   };
   sliceDoc: (from: number, to: number) => string;
-};
+}
 
 export interface Options {
   transport?: 'http' | 'native';
   hostUrl?: string;
+  hostAuthToken?: string;
+  hostTokenId?: string;
+  hostPairedExtensionId?: string;
   claudeModel?: string;
   claudeThinkingMode?: string;
   claudeMaxThinkingTokens?: number | null;
@@ -61,12 +64,12 @@ export interface Options {
   skillTrustMode?: 'verified' | 'open';
 }
 export interface StreamChunk {
-  kind: "token" | "error",
-  content: string
+  kind: 'token' | 'error';
+  content: string;
 }
 
 export interface TextContent {
-  before: string,
-  after: string,
-  selection: string,
+  before: string;
+  after: string;
+  selection: string;
 }

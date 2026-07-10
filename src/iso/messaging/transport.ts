@@ -18,7 +18,11 @@ import type { JobEvent } from '../api/sse';
 export type TransportKind = 'http' | 'native';
 
 export type Transport = {
-  createJob: (payload: JobPayload, request?: { signal?: AbortSignal }) => Promise<{ jobId: string }>;
+  pairLocalHost: (code: string) => Promise<{ tokenId: string; token: string }>;
+  createJob: (
+    payload: JobPayload,
+    request?: { signal?: AbortSignal }
+  ) => Promise<{ jobId: string }>;
   streamJobEvents: (
     jobId: string,
     onEvent: (event: JobEvent) => void,
@@ -42,7 +46,9 @@ export type Transport = {
     maxThinkingTokens: number | null;
   }>;
   fetchClaudeRuntimeContextUsage: (conversationId?: string | null) => Promise<ClaudeContextUsageResponse>;
-  fetchCodexRuntimeContextUsage: (payload?: { threadId?: string }) => Promise<CodexContextUsageResponse>;
+  fetchCodexRuntimeContextUsage: (payload?: {
+    threadId?: string;
+  }) => Promise<CodexContextUsageResponse>;
   fetchPiRuntimeMetadata: () => Promise<PiRuntimeMetadata>;
   updatePiRuntimePreferences: (payload: {
     provider?: string | null;
@@ -56,11 +62,16 @@ export type Transport = {
     thinkingLevels?: Array<{ id: string; label: string }>;
     skillTrustMode?: string;
   }>;
-  fetchPiRuntimeContextUsage: (conversationId?: string) => Promise<PiContextUsageResponse>;
+  fetchPiRuntimeContextUsage: (
+    conversationId?: string
+  ) => Promise<PiContextUsageResponse>;
   fetchHostHealth: () => Promise<HostHealthResponse>;
   fetchDiagnostics: () => Promise<DiagnosticReportV1>;
 
-  openAttachmentDialog: (payload: { multiple?: boolean; extensions?: string[] }) => Promise<{ paths: string[] }>;
+  openAttachmentDialog: (payload: {
+    multiple?: boolean;
+    extensions?: string[];
+  }) => Promise<{ paths: string[] }>;
   validateAttachmentEntries: (payload: {
     entries?: Array<{
       id?: string;
@@ -72,16 +83,25 @@ export type Transport = {
       lineCount?: number;
     }>;
     paths?: string[];
-    limits?: { maxFiles?: number; maxFileBytes?: number; maxTotalBytes?: number };
+    limits?: {
+      maxFiles?: number;
+      maxFileBytes?: number;
+      maxTotalBytes?: number;
+    };
   }) => Promise<{
     attachments: AttachmentMeta[];
     errors: Array<{ id?: string; path?: string; message: string }>;
   }>;
 
-  deleteSession: (provider: 'claude' | 'codex' | 'pi', sessionId: string) => Promise<void>;
+  deleteSession: (
+    provider: 'claude' | 'codex' | 'pi',
+    sessionId: string
+  ) => Promise<void>;
 };
 
 export function createTransport(options: Options): Transport {
   const kind = options.transport === 'native' ? 'native' : 'http';
-  return (kind === 'native' ? nativeTransport(options) : httpTransport(options)) as Transport;
+  return (
+    kind === 'native' ? nativeTransport(options) : httpTransport(options)
+  ) as Transport;
 }

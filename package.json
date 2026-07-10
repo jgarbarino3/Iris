@@ -18,7 +18,7 @@
     "test:browser": "npm run build && playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier --write --ignore-unknown \"{config,public,src}/**/*.{html,css,js,ts,json}\"",
-    "format:check": "prettier --check --ignore-unknown \".github/**/*.{yml,yaml}\" \"config/webpack.common.js\" \"docs/goals/**/*.md\" \"playwright.config.ts\" \"src/iso/diagnostics/**/*.ts\" \"test/browser/**/*.ts\" \"test/doctor-contract.test.cjs\" \"test/phase1-tooling.test.cjs\" \"test/webpack-public-path.test.cjs\" \"package.json\" \"tsconfig.json\"",
+    "format:check": "prettier --check --ignore-unknown \".github/**/*.{yml,yaml}\" \"config/webpack.common.js\" \"docs/goals/**/*.md\" \"playwright.config.ts\" \"src/iso/diagnostics/**/*.ts\" \"test/browser/**/*.ts\" \"test/doctor-contract.test.cjs\" \"test/options-migration.test.cjs\" \"test/phase1-tooling.test.cjs\" \"test/transport-security-contract.test.cjs\" \"test/webpack-public-path.test.cjs\" \"package.json\" \"tsconfig.json\"",
     "verify": "npm run format:check && npm run typecheck && npm test && npm --prefix host run verify && npm run test:browser"
   },
   "devDependencies": {

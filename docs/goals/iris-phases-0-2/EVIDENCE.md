@@ -57,6 +57,17 @@ This file records target-perspective proof, not just implementation claims.
 - Focused extension Doctor contract tests: 3 passed, 0 failed.
 - Complete root `npm run verify`: passed with 377 root tests, 310 host tests, root/host format checks, type checks, production builds, and 1 Playwright browser smoke.
 
+### P1-04 — Loopback pairing and transport security
+
+- HTTP startup rejects non-loopback bind hosts. The extension independently rejects non-HTTP and non-loopback host URLs before pairing, health, authenticated requests, or streaming, preventing a changed setting from receiving local credentials.
+- A random six-digit code expires after ten minutes or five failed attempts. Pairing persists only token ID, SHA-256 token hash, extension ID, and timestamps in `~/.iris/credentials.json` with mode `0600`; the raw bearer token remains in extension-local settings and is never rendered.
+- Protected HTTP routes and SSE require an exact allowed origin, bearer header, and `X-Iris-Extension-Id` bound to the persisted token. Pairing and minimal health remain unauthenticated and never receive bearer credentials.
+- `npm --prefix host run auth:reset` writes disk-backed revocation/pairing state. A running host reloads that state on verification, rejects the old token immediately, and accepts the replacement code printed by the reset command.
+- Native messaging measures the `1_048_576`-byte UTF-8 JSON-body output limit, returns a bounded `PAYLOAD_TOO_LARGE` response, rejects malformed or unbounded IDs, caller-supplied headers, unsupported methods/routes, and treats oversized input frames as fatal.
+- Focused P1-04 host security tests: 16 passed, 0 failed.
+- Focused extension transport/options contract tests: 9 passed, 0 failed.
+- Complete root `npm run verify`: passed with 383 root tests, 318 host tests, root/host formatting checks, type checks, production builds, and 1 Playwright browser smoke.
+
 ### P1-02 — CI and deterministic browser baseline
 
 - Root `package.json` now exposes `typecheck`, `format:check`, `test:browser`, and one `verify` aggregator; the host exposes matching `typecheck`, `format:check`, and `verify` commands.
@@ -94,7 +105,9 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 
 - P1-01: verified.
 - P1-02: verified.
-- P1-03 is the next active issue.
+- P1-03: verified.
+- P1-04: verified.
+- P1-05 is the next active issue.
 
 ## Phase 2
 

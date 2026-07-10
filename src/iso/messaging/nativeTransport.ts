@@ -24,7 +24,9 @@ function unwrapNativeResponse(response: NativeHostResponse): unknown {
   }
   if (response.status < 200 || response.status >= 300) {
     const message =
-      typeof response.body === 'object' && response.body && 'message' in response.body
+      typeof response.body === 'object' &&
+      response.body &&
+      'message' in response.body
         ? String((response.body as { message: unknown }).message)
         : `Request failed with status ${response.status}`;
     throw new Error(message);
@@ -32,7 +34,10 @@ function unwrapNativeResponse(response: NativeHostResponse): unknown {
   return response.body;
 }
 
-function sendNativeRequest(request: NativeHostRequest, options?: { timeoutMs?: number }) {
+function sendNativeRequest(
+  request: NativeHostRequest,
+  options?: { timeoutMs?: number }
+) {
   const timeoutMs = options?.timeoutMs ?? 20_000;
   return new Promise<NativeHostResponse>((resolve, reject) => {
     let settled = false;
@@ -41,29 +46,41 @@ function sendNativeRequest(request: NativeHostRequest, options?: { timeoutMs?: n
       settled = true;
       // Cancel the pending request in background
       if (request.kind === 'request') {
-        chrome.runtime.sendMessage({ type: 'ageaf:native-cancel', requestId: request.id });
+        chrome.runtime.sendMessage({
+          type: 'ageaf:native-cancel',
+          requestId: request.id,
+        });
       }
       reject(new Error('native request timed out'));
     }, timeoutMs);
 
-    chrome.runtime.sendMessage({ type: 'ageaf:native-request', request }, (response) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
+    chrome.runtime.sendMessage(
+      { type: 'ageaf:native-request', request },
+      (response) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
 
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message));
-        return;
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        resolve(response as NativeHostResponse);
       }
-      resolve(response as NativeHostResponse);
-    });
+    );
   });
 }
 
 export function nativeTransport(_options: Options): Transport {
   const options = _options;
   return {
+    async pairLocalHost() {
+      throw new Error(
+        'Local host pairing is only available for HTTP transport'
+      );
+    },
+
     async createJob(payload: JobPayload) {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
@@ -146,16 +163,27 @@ export function nativeTransport(_options: Options): Transport {
         port.postMessage({
           id: requestId,
           kind: 'request',
-          request: { method: 'GET', path: `/v1/jobs/${jobId}/events`, stream: true },
+          request: {
+            method: 'GET',
+            path: `/v1/jobs/${jobId}/events`,
+            stream: true,
+          },
         } as NativeHostRequest);
       });
     },
 
-    async respondToJobRequest(jobId: string, payload: { requestId: number | string; result: unknown }) {
+    async respondToJobRequest(
+      jobId: string,
+      payload: { requestId: number | string; result: unknown }
+    ) {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'POST', path: `/v1/jobs/${jobId}/respond`, body: payload },
+        request: {
+          method: 'POST',
+          path: `/v1/jobs/${jobId}/respond`,
+          body: payload,
+        },
       });
       return unwrapNativeResponse(response) ?? {};
     },
@@ -189,7 +217,11 @@ export function nativeTransport(_options: Options): Transport {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'POST', path: '/v1/runtime/claude/preferences', body: payload },
+        request: {
+          method: 'POST',
+          path: '/v1/runtime/claude/preferences',
+          body: payload,
+        },
       });
       return unwrapNativeResponse(response) as {
         currentModel: string | null;
@@ -244,7 +276,11 @@ export function nativeTransport(_options: Options): Transport {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'POST', path: '/v1/runtime/pi/preferences', body: payload },
+        request: {
+          method: 'POST',
+          path: '/v1/runtime/pi/preferences',
+          body: payload,
+        },
       });
       return unwrapNativeResponse(response) as {
         currentProvider: string | null;
@@ -256,7 +292,9 @@ export function nativeTransport(_options: Options): Transport {
     },
 
     async fetchPiRuntimeContextUsage(conversationId?: string) {
-      const qs = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : '';
+      const qs = conversationId
+        ? `?conversationId=${encodeURIComponent(conversationId)}`
+        : '';
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
@@ -283,11 +321,18 @@ export function nativeTransport(_options: Options): Transport {
       return unwrapNativeResponse(response) as DiagnosticReportV1;
     },
 
-    async openAttachmentDialog(payload: { multiple?: boolean; extensions?: string[] }) {
+    async openAttachmentDialog(payload: {
+      multiple?: boolean;
+      extensions?: string[];
+    }) {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'POST', path: '/v1/attachments/open', body: payload },
+        request: {
+          method: 'POST',
+          path: '/v1/attachments/open',
+          body: payload,
+        },
       });
       return unwrapNativeResponse(response) as { paths: string[] };
     },
@@ -303,12 +348,20 @@ export function nativeTransport(_options: Options): Transport {
         lineCount?: number;
       }>;
       paths?: string[];
-      limits?: { maxFiles?: number; maxFileBytes?: number; maxTotalBytes?: number };
+      limits?: {
+        maxFiles?: number;
+        maxFileBytes?: number;
+        maxTotalBytes?: number;
+      };
     }) {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'POST', path: '/v1/attachments/validate', body: payload },
+        request: {
+          method: 'POST',
+          path: '/v1/attachments/validate',
+          body: payload,
+        },
       });
       return unwrapNativeResponse(response) as {
         attachments: AttachmentMeta[];
@@ -316,11 +369,17 @@ export function nativeTransport(_options: Options): Transport {
       };
     },
 
-    async deleteSession(provider: 'claude' | 'codex' | 'pi', sessionId: string): Promise<void> {
+    async deleteSession(
+      provider: 'claude' | 'codex' | 'pi',
+      sessionId: string
+    ): Promise<void> {
       const response = await sendNativeRequest({
         id: crypto.randomUUID(),
         kind: 'request',
-        request: { method: 'DELETE', path: `/v1/sessions/${provider}/${sessionId}` },
+        request: {
+          method: 'DELETE',
+          path: `/v1/sessions/${provider}/${sessionId}`,
+        },
       });
       unwrapNativeResponse(response);
     },
