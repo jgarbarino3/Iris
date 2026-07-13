@@ -158,6 +158,7 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - Focused hardening tests: 8 passed, covering cross-project denial, sender-tab binding, cross-project idempotency, same-project key/content mismatch, v1→v2 migration, valid receipt acceptance, invalid receipt membership/hash/text/range cases, and sentinel redaction.
 - Root `npm test`: 392 CommonJS + 18 transaction TypeScript tests passed (410 total).
 - Deterministic Playwright browser gate: 2 passed, including extension-harness RPC persistence, IndexedDB schema version 2, and cross-project `WRONG_PROJECT` denial.
+- Remote GitHub Actions Verify run `29242104581` for commit `ce0a5d4` completed successfully on `codex/iris-phases-0-2`.
 
 ## Final acceptance
 
