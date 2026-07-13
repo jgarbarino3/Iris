@@ -97,6 +97,18 @@ This file records target-perspective proof, not just implementation claims.
 - Focused P1-05 contract verification: 5 passed, covering adapter ownership, version/timeout/fail-closed rules, main-world capabilities and insertion acknowledgement, acceptance-after-acknowledgement, and target-file-before-content ordering.
 - Complete root `npm run verify`: passed with 387 root tests, 318 host tests, root/host formatting checks, type checks, production builds, and 1 deterministic Playwright extension smoke.
 
+### P1-06 — Separate runtime and document authority
+
+- `Options.documentEditMode` is an independent document-authority field. Phase 1 accepts only `review`; missing or invalid legacy values normalize to `review` and set the migration persistence flag.
+- Existing Claude `claudeYoloMode`, Codex `openaiApprovalPolicy`, and Pi runtime behavior continue to govern provider command/tool authority only. Their host payload contracts are unchanged.
+- The runtime control now says `Tools: Auto` or `Tools: Ask` with precise command-access descriptions. Visible YOLO terminology was removed without silently changing existing provider authority.
+- Safety settings expose `Document edits` separately as `Review every change`. The UI states that every document mutation still waits for approval and that auto-apply arrives only after the durable transaction engine.
+- Saving settings immediately recomputes the visible runtime-authority state from the active provider, so changing Codex approvals cannot leave a stale `Tools: Auto` badge.
+- Focused option, migration, and permission-separation tests: 5 passed, 0 failed in the final focused gate; the complete root suite passed 390 tests.
+- The production unpacked-extension Playwright fixture seeds legacy options without `documentEditMode`, loads Iris, opens Tools and Safety through the public settings event, verifies the separate runtime/document labels, and observes persisted `documentEditMode=review` through extension storage. It also proves migration preserves `claudeYoloMode=false` and `openaiApprovalPolicy=never`, then changes Codex command authority to `on-request` and verifies document authority remains `review`. Browser smoke: 1 passed, 0 failed.
+- Root typecheck and production build passed. The top-level `npm run verify` reached and passed root formatting, typecheck, all 390 root tests, and the root production build, then stopped because the unrelated untracked user file `host/src/auth/pairing 2.ts` is included by the broad host Prettier glob. That file was preserved and not modified; pushed CI does not contain it.
+- A clean root `npm ci` was required because macOS cloud-placeholder files inside generated `node_modules/webpack` stalled imports. The previous generated directory was moved to Trash; the exact committed lockfile reinstall completed successfully and the production Webpack build passed.
+
 ### Dependency-audit reachability record
 
 The baseline intentionally records risk without running a broad `npm audit fix`, because its dry run would update major runtime/build surfaces and large provider dependency trees outside this issue.
@@ -119,7 +131,8 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - P1-03: verified.
 - P1-04: verified.
 - P1-05: verified.
-- P1-06 is the next active issue.
+- P1-06: verified.
+- Phase 1 is verified; P2-01 is the next active issue.
 
 ## Phase 2
 

@@ -51,6 +51,7 @@ export interface Options {
   claudeSessionScope?: 'project' | 'home';
   claudeYoloMode?: boolean;
   openaiApprovalPolicy?: 'untrusted' | 'on-request' | 'on-failure' | 'never';
+  documentEditMode?: 'review';
   piProvider?: string;
   piModel?: string;
   piThinkingLevel?: string;

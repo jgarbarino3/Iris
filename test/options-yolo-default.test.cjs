@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-test('Options default YOLO mode is enabled', () => {
+test('Legacy Claude runtime authority default remains enabled during label migration', () => {
   const helperPath = path.join(__dirname, '..', 'src', 'utils', 'helper.ts');
   const contents = fs.readFileSync(helperPath, 'utf8');
 

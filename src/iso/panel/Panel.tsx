@@ -122,6 +122,14 @@ const EDITOR_OVERLAY_CLEAR_EVENT = 'ageaf:editor:overlay:clear';
 const EDITOR_OVERLAY_READY_EVENT = 'ageaf:editor:overlay:ready';
 const PANEL_OVERLAY_ACTION_EVENT = 'ageaf:panel:patch-review-action';
 
+function isRuntimeAutonomous(provider: ProviderId, options: Options): boolean {
+  if (provider === 'pi') return true;
+  if (provider === 'codex') {
+    return (options.openaiApprovalPolicy ?? 'never') === 'never';
+  }
+  return options.claudeYoloMode ?? true;
+}
+
 type RemoteCommitInfo = {
   sha: string;
   shortSha: string;
@@ -998,7 +1006,7 @@ const Panel = () => {
     number | null
   >(null);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
-  const [yoloMode, setYoloMode] = useState(true);
+  const [runtimeAutonomous, setRuntimeAutonomous] = useState(true);
   const [tipIndex, setTipIndex] = useState(0);
   const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>(
@@ -1790,13 +1798,7 @@ const Panel = () => {
       if (cancelled) return;
       setSettings(options);
       setSettingsMessage('');
-      setYoloMode(
-        chatProvider === 'pi'
-          ? true
-          : chatProvider === 'codex'
-            ? (options.openaiApprovalPolicy ?? 'never') === 'never'
-            : options.claudeYoloMode ?? true
-      );
+      setRuntimeAutonomous(isRuntimeAutonomous(chatProvider, options));
 
       const conversationId = chatConversationIdRef.current;
       const state = chatStateRef.current;
@@ -1894,7 +1896,7 @@ const Panel = () => {
             setCurrentThinkingMode(rawLevel === 'xhigh' ? 'ultra' : rawLevel);
           }
           setCurrentThinkingTokens(null);
-          setYoloMode(true); // Pi is always YOLO
+          setRuntimeAutonomous(true); // Pi runtime is always autonomous.
 
           lastHostOkAtRef.current = now;
           lastRuntimeOkAtRef.current = now;
@@ -1988,7 +1990,9 @@ const Panel = () => {
             : selectedModel?.defaultReasoningEffort ?? null;
           setCurrentThinkingMode(getThinkingModeIdForCodexEffort(effort));
           setCurrentThinkingTokens(null);
-          setYoloMode((options.openaiApprovalPolicy ?? 'never') === 'never');
+          setRuntimeAutonomous(
+            (options.openaiApprovalPolicy ?? 'never') === 'never'
+          );
 
           // Update connection health - runtime is working since we got metadata
           lastHostOkAtRef.current = now;
@@ -2055,7 +2059,7 @@ const Panel = () => {
             null
             : options.claudeMaxThinkingTokens ?? null
         );
-        setYoloMode(options.claudeYoloMode ?? true);
+        setRuntimeAutonomous(options.claudeYoloMode ?? true);
 
         // Update connection health - runtime is working since we got metadata
         lastHostOkAtRef.current = now;
@@ -2070,7 +2074,7 @@ const Panel = () => {
           setCurrentThinkingMode(options.piThinkingLevel ?? 'off');
           setCurrentThinkingTokens(null);
           setCurrentModel(options.piModel ?? null);
-          setYoloMode(true);
+          setRuntimeAutonomous(true);
           return;
         }
         setRuntimeModels(chatProvider === 'claude' ? CLAUDE_FALLBACK_MODELS : []);
@@ -2090,7 +2094,7 @@ const Panel = () => {
         setCurrentThinkingMode(options.claudeThinkingMode ?? 'off');
         setCurrentThinkingTokens(options.claudeMaxThinkingTokens ?? null);
         setCurrentModel(options.claudeModel ?? DEFAULT_MODEL_VALUE);
-        setYoloMode(options.claudeYoloMode ?? true);
+        setRuntimeAutonomous(options.claudeYoloMode ?? true);
       }
     };
 
@@ -5801,10 +5805,10 @@ const Panel = () => {
     await applyRuntimePreferences({ thinkingMode: modeId });
   };
 
-  const onToggleYoloMode = async () => {
-    if (chatProvider === 'pi') return; // Pi is always YOLO — no-op
-    const next = !yoloMode;
-    setYoloMode(next);
+  const onToggleRuntimeAccess = async () => {
+    if (chatProvider === 'pi') return;
+    const next = !runtimeAutonomous;
+    setRuntimeAutonomous(next);
     if (chatProvider === 'codex') {
       await persistRuntimeOptions({
         openaiApprovalPolicy: next ? 'never' : 'on-request',
@@ -7163,7 +7167,7 @@ const Panel = () => {
                   model: runtimeModel ?? undefined,
                   maxThinkingTokens: runtimeThinkingTokens ?? undefined,
                   sessionScope: 'project' as const,
-                  yoloMode,
+                  yoloMode: runtimeAutonomous,
                   conversationId: sessionConversationId,
                 },
               },
@@ -9859,6 +9863,7 @@ const Panel = () => {
     try {
       await chrome.storage.local.set({ [LOCAL_STORAGE_KEY_OPTIONS]: settings });
       invalidateOptionsCache();
+      setRuntimeAutonomous(isRuntimeAutonomous(chatProvider, settings));
       setSettingsMessage('Saved');
       void refreshContextUsage({ force: true });
 
@@ -10898,34 +10903,47 @@ const Panel = () => {
                   <span class="ageaf-runtime__value">{usagePercent}%</span>
                 </div>
                 <button
-                  class={`ageaf-runtime__yolo ${yoloMode ? 'is-on' : ''}`}
+                  class={`ageaf-runtime__yolo ${runtimeAutonomous ? 'is-on' : ''}`}
                   type="button"
                   role="switch"
-                  aria-checked={chatProvider === 'pi' ? true : yoloMode}
+                  aria-checked={chatProvider === 'pi' ? true : runtimeAutonomous}
                   disabled={chatProvider === 'pi'}
                   aria-label={
                     chatProvider === 'pi'
-                      ? 'BYOK always runs in YOLO mode'
+                      ? 'BYOK runtime tools always run automatically'
                       : chatProvider === 'codex'
-                        ? yoloMode
-                          ? 'Codex YOLO mode enabled'
-                          : 'Codex safe mode enabled'
-                        : yoloMode
-                          ? 'YOLO mode enabled'
-                          : 'Safe mode enabled'
+                        ? runtimeAutonomous
+                          ? 'Codex runtime tools run automatically'
+                          : 'Codex runtime tools ask for approval'
+                        : runtimeAutonomous
+                          ? 'Claude runtime tools run automatically'
+                          : 'Claude runtime tools ask for approval'
                   }
-                  data-tooltip={chatProvider === 'pi' ? 'Always YOLO' : yoloMode ? 'YOLO mode' : 'Safe mode'}
+                  data-tooltip={
+                    chatProvider === 'pi'
+                      ? 'Runtime tools: automatic'
+                      : runtimeAutonomous
+                        ? 'Runtime tools: automatic'
+                        : 'Runtime tools: ask first'
+                  }
                   onClick={() => {
-                    void onToggleYoloMode();
+                    void onToggleRuntimeAccess();
                   }}
                 >
                   <span class="ageaf-runtime__yolo-text">
-                    {yoloMode ? 'YOLO' : 'Safe'}
+                    {runtimeAutonomous ? 'Tools: Auto' : 'Tools: Ask'}
                   </span>
                   <span class="ageaf-runtime__yolo-switch" aria-hidden="true">
                     <span class="ageaf-runtime__yolo-thumb" />
                   </span>
                 </button>
+                <span
+                  class="ageaf-runtime__document-mode"
+                  aria-label="Document edits require review"
+                  data-tooltip="Document edits: Review every change"
+                >
+                  Review
+                </span>
               </div>
             </>
           ) : (
@@ -11597,12 +11615,14 @@ const Panel = () => {
                   {settingsTab === 'tools' ? (
                     <div class="ageaf-settings__section">
                       <h3>Tools</h3>
-                      <h4 class="ageaf-settings__subhead">OpenAI</h4>
+                      <h4 class="ageaf-settings__subhead">
+                        Runtime command access
+                      </h4>
                       <label
                         class="ageaf-settings__label"
                         for="ageaf-openai-approval-policy"
                       >
-                        Approval policy
+                        Codex command approvals
                       </label>
                       <select
                         id="ageaf-openai-approval-policy"
@@ -11622,9 +11642,9 @@ const Panel = () => {
                         <option value="never">never</option>
                       </select>
                       <p class="ageaf-settings__hint">
-                        Controls Codex CLI command approvals (approvalPolicy).
-                        Use "never" only if you trust the agent to run commands
-                        without prompting.
+                        Controls commands, filesystem, network, and tool prompts
+                        for the Codex runtime. It does not grant permission to
+                        edit the document automatically.
                       </p>
 
                       <label
@@ -11695,6 +11715,24 @@ const Panel = () => {
                   {settingsTab === 'safety' ? (
                     <div class="ageaf-settings__section">
                       <h3>Safety</h3>
+                      <h4 class="ageaf-settings__subhead">Document edits</h4>
+                      <label
+                        class="ageaf-settings__label"
+                        for="ageaf-document-edit-mode"
+                      >
+                        Application mode
+                      </label>
+                      <select
+                        id="ageaf-document-edit-mode"
+                        class="ageaf-settings__input"
+                        value={settings.documentEditMode ?? 'review'}
+                        disabled
+                      >
+                        <option value="review">Review every change</option>
+                      </select>
+                      <p class="ageaf-settings__hint">
+                        Every document edit waits for your approval. Runtime tool permissions do not change this. Auto-apply arrives after the durable transaction engine.
+                      </p>
                       <label class="ageaf-settings__checkbox">
                         <input
                           type="checkbox"

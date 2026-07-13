@@ -10,8 +10,8 @@ Status values: `pending`, `active`, `verified`, `blocked`, `superseded`.
 | P1-03 | verified | Implement shared diagnostics, read-only Doctor, panel checks, and safe repair                                        | Diagnostic schema / CLI+browser reports           | P1-01        |
 | P1-04 | verified | Implement loopback pairing, token persistence/reset, strict CORS, and authenticated streaming                        | Host auth service / Fastify injection             | P1-01        |
 | P1-05 | verified | Implement bridge handshake, capability health, reconnect, and fail-closed apply controls                             | Bridge protocol / browser fixture                 | P1-02        |
-| P1-06 | active   | Separate runtime permissions from `documentEditMode=review` and migrate labels/settings                              | Options model / UI behavior                       | P1-01        |
-| P2-01 | pending  | Add shared transaction/batch/error schemas and background IndexedDB service                                          | Transaction service / storage restart tests       | P1-02, P1-05 |
+| P1-06 | verified | Separate runtime permissions from `documentEditMode=review` and migrate labels/settings                              | Options model / UI behavior                       | P1-01        |
+| P2-01 | active   | Add shared transaction/batch/error schemas and background IndexedDB service                                          | Transaction service / storage restart tests       | P1-02, P1-05 |
 | P2-02 | pending  | Cut anchored insertion over to batch-of-one acknowledgement                                                          | Transaction service / cursor-reload browser tests | P2-01        |
 | P2-03 | pending  | Cut selection and file/range replacements over                                                                       | Transaction service / exact-target tests          | P2-02        |
 | P2-04 | pending  | Implement file-atomic batches, explicit subset batches, overlap/order rules, and best-effort multi-file compensation | Batch service / injected-failure tests            | P2-03        |
@@ -27,6 +27,7 @@ Status values: `pending`, `active`, `verified`, `blocked`, `superseded`.
 - A1 / P1-03 verified: versioned host and browser diagnostics, the read-only Doctor CLI/route, in-panel checks, and manual safe-repair guidance pass focused tests and the complete verification entry point. P1-04 is active.
 - A2 / P1-04 verified: loopback HTTP pairing, cross-process reset/revocation, exact origin and extension-instance binding, authenticated streaming, loopback-only client URLs, native size/route/method guards, and secret-redaction tests pass focused and complete verification. P1-05 is active.
 - A3-A4 / P1-05 verified: one isolated editor adapter owns request correlation, bounded timeouts, versioned handshake health, project/instance/cursor validation, and fail-closed capability gates. Insertions now use the acknowledged apply channel, wrong-file replacement proves file identity before content inspection, and stale direct writers were removed. P1-06 is active.
+- P1-06 verified: legacy options persist an explicit safe `documentEditMode=review`; provider-specific command authority remains independent, user-facing YOLO terminology is replaced by runtime access language, and the unpacked-extension browser fixture proves both migrated storage and separate rendered controls. P2-01 is active.
 
 ## Parallelism rules
 
