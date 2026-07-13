@@ -146,10 +146,7 @@ export function createTransactionRuntimeHandler(
             const transactionError =
               error instanceof TransactionError
                 ? error
-                : new TransactionError(
-                    'APPLY_FAILED',
-                    'Insertion preflight failed'
-                  );
+                : new TransactionError('APPLY_FAILED', 'Edit preflight failed');
             await dependencies.service.failPreflight(
               scoped.projectId,
               scoped.id,

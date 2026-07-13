@@ -28,7 +28,10 @@ const FIXTURE_HTML = `<!doctype html>
           'main.tex': ${JSON.stringify(MAIN_CONTENT)},
           'other.tex': ${JSON.stringify(OTHER_CONTENT)},
         };
-        const cursors = { 'main.tex': 0, 'other.tex': 0 };
+        const selections = {
+          'main.tex': { from: 0, to: 0, head: 0 },
+          'other.tex': { from: 0, to: 0, head: 0 },
+        };
         let activeFile = 'main.tex';
         let dispatchCount = 0;
         const contentElement = document.querySelector('.cm-content');
@@ -40,13 +43,16 @@ const FIXTURE_HTML = `<!doctype html>
 
         const makeState = () => {
           const content = files[activeFile];
-          const head = Math.max(0, Math.min(content.length, cursors[activeFile]));
+          const selected = selections[activeFile];
+          const from = Math.max(0, Math.min(content.length, selected.from));
+          const to = Math.max(from, Math.min(content.length, selected.to));
+          const head = Math.max(from, Math.min(to, selected.head));
           return {
             doc: {
               length: content.length,
               lineAt: (position) => lineAt(content, position),
             },
-            selection: { main: { from: head, to: head, head } },
+            selection: { main: { from, to, head } },
             sliceDoc: (from, to) => content.slice(from, to),
             update: () => ({ constructor: {} }),
           };
@@ -74,7 +80,11 @@ const FIXTURE_HTML = `<!doctype html>
                 dispatchCount += 1;
               }
               if (spec.selection && Number.isInteger(spec.selection.anchor)) {
-                cursors[activeFile] = spec.selection.anchor;
+                selections[activeFile] = {
+                  from: spec.selection.anchor,
+                  to: spec.selection.anchor,
+                  head: spec.selection.anchor,
+                };
               }
             }
             view.state = makeState();
@@ -101,12 +111,18 @@ const FIXTURE_HTML = `<!doctype html>
         window.__irisFixture = {
           activate,
           setCursor(filePath, offset) {
-            cursors[filePath] = offset;
+            selections[filePath] = { from: offset, to: offset, head: offset };
+            if (activeFile === filePath) view.state = makeState();
+          },
+          setSelection(filePath, from, to) {
+            selections[filePath] = { from, to, head: to };
             if (activeFile === filePath) view.state = makeState();
           },
           setContent(filePath, content) {
             files[filePath] = content;
-            cursors[filePath] = Math.min(cursors[filePath], content.length);
+            const selected = selections[filePath];
+            const head = Math.min(selected.head, content.length);
+            selections[filePath] = { from: head, to: head, head };
             if (activeFile === filePath) view.state = makeState();
           },
           snapshot() {
@@ -114,7 +130,13 @@ const FIXTURE_HTML = `<!doctype html>
               activeFile,
               dispatchCount,
               files: { ...files },
-              cursors: { ...cursors },
+              cursors: Object.fromEntries(
+                Object.entries(selections).map(([filePath, selection]) => [
+                  filePath,
+                  selection.head,
+                ])
+              ),
+              selections: structuredClone(selections),
             };
           },
         };
@@ -163,6 +185,72 @@ function insertionRequest(options?: {
       },
     ],
   };
+}
+
+function replacementRequest(options?: {
+  content?: string;
+  projectId?: string;
+  filePath?: string;
+  fileId?: string;
+  expectedText?: string;
+  replacementText?: string;
+  from?: number;
+  to?: number;
+  prefix?: string;
+  suffix?: string;
+  requestId?: string;
+  batchId?: string;
+}) {
+  const content = options?.content ?? MAIN_CONTENT;
+  const expectedText = options?.expectedText ?? 'unique cursor';
+  const from = options?.from ?? content.indexOf(expectedText);
+  const to = options?.to ?? from + expectedText.length;
+  return {
+    schemaVersion: 1 as const,
+    protocolVersion: 1 as const,
+    requestId: options?.requestId ?? 'p2-03-request',
+    batchId: options?.batchId ?? 'p2-03-batch',
+    projectId: options?.projectId ?? PROJECT_ID,
+    filePath: options?.filePath ?? 'main.tex',
+    fileId: options?.fileId ?? 'file-main',
+    expectedBaseSha256: sha256(content),
+    changes: [
+      {
+        transactionId: 'p2-03-transaction',
+        from,
+        to,
+        expectedText,
+        replacementText: options?.replacementText ?? 'durable replacement',
+        prefix: options?.prefix ?? content.slice(Math.max(0, from - 256), from),
+        suffix: options?.suffix ?? content.slice(to, to + 256),
+        proposalOrder: 0,
+      },
+    ],
+  };
+}
+
+async function sendBatch(serviceWorker: any, batch: unknown) {
+  return serviceWorker.evaluate(async (request: any) => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    return new Promise<any>((resolve, reject) => {
+      if (!tab?.id) {
+        reject(new Error('Missing deterministic Overleaf tab'));
+        return;
+      }
+      chrome.tabs.sendMessage(
+        tab.id,
+        { type: 'iris:transaction:apply-batch', request },
+        (response) => {
+          const error = chrome.runtime.lastError;
+          if (error) reject(new Error(error.message));
+          else resolve(response);
+        }
+      );
+    });
+  }, batch);
 }
 
 test('recorded insertion ignores later cursor/file changes, restores the file, and dispatches once', async ({
@@ -407,6 +495,210 @@ test('wrong identity, stale content, and absent or ambiguous anchors fail before
     })
   );
   expect(ambiguous.error?.code).toBe('AMBIGUOUS_ANCHOR');
+  expect(
+    await page.evaluate(
+      () => (window as any).__irisFixture.snapshot().dispatchCount
+    )
+  ).toBe(0);
+});
+
+test('recorded replacement ignores later selection/file changes, restores the file, and dispatches once', async ({
+  context,
+}) => {
+  await context.route('https://www.overleaf.com/**', async (route) => {
+    if (route.request().resourceType() === 'document') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: FIXTURE_HTML,
+      });
+      return;
+    }
+    await route.fulfill({ status: 204, body: '' });
+  });
+
+  const page = await context.newPage();
+  await page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded' });
+  await page.bringToFront();
+  await expect(page.locator('#ageaf-panel-root')).toHaveCount(1);
+
+  const request = replacementRequest();
+  await page.evaluate(({ from, to }) => {
+    const fixture = (window as any).__irisFixture;
+    fixture.activate('main.tex');
+    fixture.setSelection('main.tex', from, to);
+  }, request.changes[0]);
+  const captured = await page.evaluate(
+    () =>
+      new Promise<any>((resolve) => {
+        const requestId = 'capture-selection-target';
+        const listener = (event: Event) => {
+          const detail = (event as CustomEvent).detail;
+          if (detail?.requestId !== requestId) return;
+          window.removeEventListener('ageaf:editor:response', listener);
+          resolve(detail);
+        };
+        window.addEventListener('ageaf:editor:response', listener);
+        window.dispatchEvent(
+          new CustomEvent('ageaf:editor:request', {
+            detail: { requestId },
+          })
+        );
+      })
+  );
+  expect(captured).toMatchObject({
+    projectId: PROJECT_ID,
+    filePath: 'main.tex',
+    fileId: 'file-main',
+    content: MAIN_CONTENT,
+    selection: request.changes[0].expectedText,
+    from: request.changes[0].from,
+    to: request.changes[0].to,
+  });
+
+  await page.evaluate(() => {
+    const fixture = (window as any).__irisFixture;
+    fixture.setSelection('main.tex', 0, 0);
+    fixture.setSelection('other.tex', 2, 2);
+    fixture.activate('other.tex');
+  });
+  const [serviceWorker] = context.serviceWorkers();
+  const receipt = await sendBatch(serviceWorker, request);
+  expect(receipt.success).toBe(true);
+  expect(receipt.appliedChanges).toEqual([
+    {
+      transactionId: 'p2-03-transaction',
+      from: request.changes[0].from,
+      to: request.changes[0].to,
+      oldText: request.changes[0].expectedText,
+      newText: request.changes[0].replacementText,
+    },
+  ]);
+  expect(await sendBatch(serviceWorker, request)).toEqual(receipt);
+
+  const snapshot = await page.evaluate(() =>
+    (window as any).__irisFixture.snapshot()
+  );
+  expect(snapshot.files['main.tex']).toBe(
+    MAIN_CONTENT.replace('unique cursor', 'durable replacement')
+  );
+  expect(snapshot.files['other.tex']).toBe(OTHER_CONTENT);
+  expect(snapshot.activeFile).toBe('other.tex');
+  expect(snapshot.dispatchCount).toBe(1);
+});
+
+test('replacement identity, drift, text, range, and anchor failures never dispatch', async ({
+  context,
+}) => {
+  await context.route('https://www.overleaf.com/**', async (route) => {
+    if (route.request().resourceType() === 'document') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: FIXTURE_HTML,
+      });
+      return;
+    }
+    await route.fulfill({ status: 204, body: '' });
+  });
+  const page = await context.newPage();
+  await page.goto(PROJECT_URL, { waitUntil: 'domcontentloaded' });
+  await page.bringToFront();
+  await expect(page.locator('#ageaf-panel-root')).toHaveCount(1);
+  const [serviceWorker] = context.serviceWorkers();
+
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          projectId: 'wrong-project',
+          requestId: 'replace-wrong-project',
+          batchId: 'replace-wrong-project-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('WRONG_PROJECT');
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          fileId: 'wrong-file',
+          requestId: 'replace-wrong-file',
+          batchId: 'replace-wrong-file-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('WRONG_FILE');
+
+  await page.evaluate((content) => {
+    (window as any).__irisFixture.setContent('main.tex', `${content}!`);
+  }, MAIN_CONTENT);
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          requestId: 'replace-stale',
+          batchId: 'replace-stale-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('STALE_HASH');
+
+  await page.evaluate((content) => {
+    (window as any).__irisFixture.setContent('main.tex', content);
+  }, MAIN_CONTENT);
+  const targetFrom = MAIN_CONTENT.indexOf('unique cursor');
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          expectedText: 'wrong targets',
+          from: targetFrom,
+          to: targetFrom + 'wrong targets'.length,
+          requestId: 'replace-wrong-text',
+          batchId: 'replace-wrong-text-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('EXPECTED_TEXT_MISMATCH');
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          prefix: 'missing-prefix',
+          requestId: 'replace-missing-anchor',
+          batchId: 'replace-missing-anchor-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('EXPECTED_TEXT_MISMATCH');
+
+  const repeated = 'AOLDZAOLDZ';
+  await page.evaluate((content) => {
+    (window as any).__irisFixture.setContent('main.tex', content);
+  }, repeated);
+  expect(
+    (
+      await sendBatch(
+        serviceWorker,
+        replacementRequest({
+          content: repeated,
+          expectedText: 'OLD',
+          from: 1,
+          to: 4,
+          prefix: 'A',
+          suffix: 'Z',
+          requestId: 'replace-ambiguous',
+          batchId: 'replace-ambiguous-batch',
+        })
+      )
+    ).error?.code
+  ).toBe('AMBIGUOUS_ANCHOR');
   expect(
     await page.evaluate(
       () => (window as any).__irisFixture.snapshot().dispatchCount

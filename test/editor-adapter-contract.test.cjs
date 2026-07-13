@@ -29,7 +29,7 @@ test('editor adapter uses a versioned bounded fail-closed handshake', () => {
   assert.doesNotMatch(adapter, /insertAtCursor\s*:/);
 });
 
-test('main bridge advertises and acknowledges anchored insertion batches', () => {
+test('main bridge advertises and acknowledges strict single-edit batches', () => {
   const bridge = read('src/main/editorBridge/bridge.ts');
   assert.match(bridge, /HELLO_REQUEST_EVENT/);
   assert.match(bridge, /bridgeInstanceId: BRIDGE_INSTANCE_ID/);
@@ -37,19 +37,19 @@ test('main bridge advertises and acknowledges anchored insertion batches', () =>
   assert.match(bridge, /applyEditBatch: editorReady/);
   assert.match(bridge, /insertionTarget: editorReady/);
   assert.match(bridge, /validateAnchoredInsertionBatch/);
+  assert.match(bridge, /validateDurableReplacementBatch/);
   assert.match(bridge, /new CustomEvent\(BATCH_RESPONSE_EVENT/);
   assert.doesNotMatch(bridge, /['"]ageaf:editor:insert['"]/);
   assert.doesNotMatch(bridge, /detail\.kind === 'insertAtCursor'/);
 });
 
-test('panel marks insert accepted only after a durable transaction receipt', () => {
+test('panel marks edits accepted only after a durable transaction receipt', () => {
   const panel = read('src/iso/panel/Panel.tsx');
   assert.match(panel, /transactionRpc<EditTransactionV1>\(\s*'preflight'/);
   assert.match(panel, /transactionRpc<EditTransactionV1>\(\s*'apply'/);
-  assert.match(panel, /resolvedTransaction\.receipt\?\.success !== true/);
-  assert.match(
-    panel,
-    /setPatchReviewTextAndStatus\(messageId, 'accepted', nextText\)/
-  );
+  assert.match(panel, /transaction\.receipt\?\.success !== true/);
+  assert.match(panel, /status: 'accepted'/);
+  assert.match(panel, /transactionRevision: appliedTransaction\.revision/);
   assert.doesNotMatch(panel, /ageafBridge\.insertAtCursor/);
+  assert.doesNotMatch(panel, /applyReplaceRange|applyReplaceInFile/);
 });

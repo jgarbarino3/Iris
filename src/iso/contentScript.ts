@@ -8,6 +8,7 @@ import {
   transactionToBatchRequest,
   validateAnchoredInsertionBatch,
 } from '../transactions/anchoredInsertion';
+import { validateDurableReplacementBatch } from '../transactions/durableReplacement';
 import type {
   ApplyEditBatchRequestV1,
   EditTransactionV1,
@@ -191,7 +192,7 @@ try {
       window.dispatchEvent(new CustomEvent('ageaf:settings:open'));
       return undefined;
     }
-    if (request?.type === 'iris:transaction:preflight-insertion') {
+    if (request?.type === 'iris:transaction:preflight-edit') {
       const transaction = request.transaction as EditTransactionV1;
       void (async () => {
         const file = await editorAdapter.requestTargetFile({
@@ -207,15 +208,21 @@ try {
             file?.error ?? 'EDITOR_UNAVAILABLE'
           );
         }
-        const validation = await validateAnchoredInsertionBatch(
-          transactionToBatchRequest(transaction, 'preflight', 'preflight'),
-          {
-            projectId: transaction.projectId,
-            filePath: file.filePath,
-            ...(file.fileId ? { fileId: file.fileId } : {}),
-            content: file.content,
-          }
+        const batch = transactionToBatchRequest(
+          transaction,
+          'preflight',
+          'preflight'
         );
+        const snapshot = {
+          projectId: transaction.projectId,
+          filePath: file.filePath,
+          ...(file.fileId ? { fileId: file.fileId } : {}),
+          content: file.content,
+        };
+        const validation =
+          transaction.intent === 'insert'
+            ? await validateAnchoredInsertionBatch(batch, snapshot)
+            : await validateDurableReplacementBatch(batch, snapshot);
         return {
           ok: true,
           expectedPostApplySha256: validation.afterSha256,

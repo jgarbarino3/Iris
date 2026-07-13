@@ -1,11 +1,11 @@
 import { getContentAfterCursor, getContentBeforeCursor, getCmView } from '../helpers';
-import { applyReplacementAtRange } from '../eventHandlers';
 import { MAX_LENGTH_AFTER_CURSOR, MAX_LENGTH_BEFORE_CURSOR } from '../../constants';
 import {
   canonicalFilePath,
   validateAnchoredInsertionBatch,
   type EditorFileSnapshotV1,
 } from '../../transactions/anchoredInsertion';
+import { validateDurableReplacementBatch } from '../../transactions/durableReplacement';
 import {
   TransactionError,
   sanitizeFailure,
@@ -17,8 +17,6 @@ import {
 
 const REQUEST_EVENT = 'ageaf:editor:request';
 const RESPONSE_EVENT = 'ageaf:editor:response';
-const APPLY_REQUEST_EVENT = 'ageaf:editor:apply:request';
-const APPLY_RESPONSE_EVENT = 'ageaf:editor:apply:response';
 const BATCH_REQUEST_EVENT = 'ageaf:editor:batch:request';
 const BATCH_RESPONSE_EVENT = 'ageaf:editor:batch:response';
 const INSERTION_TARGET_REQUEST_EVENT =
@@ -50,6 +48,10 @@ interface SelectionRequest {
 
 interface SelectionResponse {
   requestId: string;
+  projectId: string | null;
+  filePath: string;
+  fileId?: string;
+  content: string;
   activeName: string | null;
   selection: string;
   before: string;
@@ -72,35 +74,6 @@ interface InsertionTargetResponseV1 {
   fileId?: string;
   content: string;
   offset: number;
-  ok: boolean;
-  error?: string;
-}
-
-interface ApplyReplaceRangeRequest {
-  requestId: string;
-  kind: 'replaceRange';
-  from: number;
-  to: number;
-  expectedOldText: string;
-  text: string;
-}
-
-interface ApplyReplaceInFileRequest {
-  requestId: string;
-  kind: 'replaceInFile';
-  filePath: string;
-  expectedOldText: string;
-  text: string;
-  from?: number;
-  to?: number;
-}
-
-type ApplyRequest =
-  | ApplyReplaceRangeRequest
-  | ApplyReplaceInFileRequest;
-
-interface ApplyResponse {
-  requestId: string;
   ok: boolean;
   error?: string;
 }
@@ -197,8 +170,6 @@ function onHelloRequest(event: Event) {
     targetFile: editorReady,
     navigation: editorReady,
     applyEditBatch: editorReady,
-    replaceRange: editorReady,
-    replaceInFile: editorReady,
     history: editorReady,
   };
   window.dispatchEvent(
@@ -255,10 +226,6 @@ function resolveAddToHistory(view: any) {
   } catch {
     // CM6 internals not accessible; accept changes remain in native undo history.
   }
-}
-
-function getAddToHistoryFalse() {
-  return addToHistoryAnnotationType?.of?.(false);
 }
 
 function installDispatchTracker(view: any) {
@@ -653,11 +620,17 @@ function onSelectionRequest(event: Event) {
   const view = getTrackedCmView();
   const state = view.state;
   const { from, to, head } = state.selection.main;
-  const activeName = getActiveTabName();
+  const activeFile = getActiveFileDescriptor();
+  const activeName = activeFile?.filePath ?? null;
+  const content = state.sliceDoc(0, state.doc.length);
 
   const inclusiveEnd = to > from ? Math.max(from, to - 1) : to;
   const response: SelectionResponse = {
     requestId: detail.requestId,
+    projectId: currentProjectId(),
+    filePath: activeFile?.filePath ?? '',
+    ...(activeFile?.fileId ? { fileId: activeFile.fileId } : {}),
+    content,
     activeName,
     selection: state.sliceDoc(from, to),
     before: getContentBeforeCursor(state, from, MAX_LENGTH_BEFORE_CURSOR),
@@ -787,7 +760,7 @@ function batchFailureReceipt(
   };
 }
 
-async function executeAnchoredInsertionBatch(
+async function executeEditBatch(
   request: ApplyEditBatchRequestV1
 ): Promise<ApplyEditBatchReceiptV1> {
   const originalFile = getActiveFileDescriptor();
@@ -810,8 +783,11 @@ async function executeAnchoredInsertionBatch(
       ...(activeFile.fileId ? { fileId: activeFile.fileId } : {}),
       content,
     };
-    const validation = await validateAnchoredInsertionBatch(request, snapshot);
     const change = request.changes[0]!;
+    const validation =
+      change.from === change.to && change.expectedText === ''
+        ? await validateAnchoredInsertionBatch(request, snapshot)
+        : await validateDurableReplacementBatch(request, snapshot);
 
     reviewChangeInProgress = true;
     try {
@@ -867,7 +843,7 @@ function onBatchRequest(event: Event) {
   const cacheKey = `${request.requestId}\u001e${request.batchId}`;
   let execution = batchExecutions.get(cacheKey);
   if (!execution) {
-    execution = executeAnchoredInsertionBatch(request);
+    execution = executeEditBatch(request);
     batchExecutions.set(cacheKey, execution);
   }
   void execution.then((receipt) => {
@@ -876,310 +852,6 @@ function onBatchRequest(event: Event) {
     );
   });
 }
-
-async function onApplyRequest(event: Event) {
-  const detail = (event as CustomEvent<ApplyRequest>).detail;
-  if (!detail?.requestId) return;
-  let ok = true;
-  let error: string | undefined;
-
-  try {
-    let view = getTrackedCmView();
-
-    const withProtectedEditBypass = (fn: () => void) => {
-      const key = '__ageafAllowProtectedEdits';
-      const prev = (window as any)[key];
-      (window as any)[key] = true;
-      try {
-        fn();
-      } finally {
-        (window as any)[key] = prev;
-      }
-    };
-
-    const findClosestOccurrence = (fullText: string, needle: string, hintFrom: number) => {
-      if (!needle) return null;
-      const windowSize = 8000;
-      const start = Math.max(0, hintFrom - Math.floor(windowSize / 2));
-      const end = Math.min(fullText.length, hintFrom + Math.floor(windowSize / 2));
-      const chunk = fullText.slice(start, end);
-      const hits: number[] = [];
-      let idx = chunk.indexOf(needle);
-      while (idx !== -1) {
-        hits.push(start + idx);
-        idx = chunk.indexOf(needle, idx + Math.max(1, needle.length));
-        if (hits.length > 10) break;
-      }
-      if (hits.length === 0) return null;
-      // Choose the closest hit to the original from position.
-      let best = hits[0];
-      let bestDist = Math.abs(best - hintFrom);
-      for (const pos of hits.slice(1)) {
-        const dist = Math.abs(pos - hintFrom);
-        if (dist < bestDist) {
-          best = pos;
-          bestDist = dist;
-        }
-      }
-      // Only accept if reasonably close (prevents wrong replacements when repeated text exists).
-      if (bestDist > 4000) return null;
-      return { from: best, to: best + needle.length };
-    };
-
-    if (detail.kind === 'replaceRange') {
-      const hasValidRange =
-        typeof detail.from === 'number' &&
-        Number.isFinite(detail.from) &&
-        typeof detail.to === 'number' &&
-        Number.isFinite(detail.to) &&
-        detail.to >= detail.from;
-
-      if (
-        typeof detail.expectedOldText !== 'string' ||
-        typeof detail.text !== 'string' ||
-        !hasValidRange
-      ) {
-        ok = false;
-        error = 'Invalid replaceRange patch';
-      } else {
-        const current = view.state.sliceDoc(detail.from, detail.to);
-        if (current !== detail.expectedOldText) {
-          // If offsets shifted due to earlier edits (e.g., multiple hunks in same paragraph),
-          // fall back to locating the expected text near the original position.
-          const full = view.state.sliceDoc(0, view.state.doc.length);
-          const closest = findClosestOccurrence(full, detail.expectedOldText, detail.from);
-          if (!closest) {
-            ok = false;
-            error = 'Selection changed';
-          } else {
-            const verify = view.state.sliceDoc(closest.from, closest.to);
-            if (verify !== detail.expectedOldText) {
-              ok = false;
-              error = 'Selection changed';
-            } else {
-              withProtectedEditBypass(() => {
-                reviewChangeInProgress = true;
-                try {
-                  applyReplacementAtRange(
-                    view,
-                    closest.from,
-                    closest.to,
-                    detail.text,
-                    { annotations: getAddToHistoryFalse() }
-                  );
-                } finally {
-                  reviewChangeInProgress = false;
-                }
-              });
-            }
-          }
-        } else {
-          withProtectedEditBypass(() => {
-            reviewChangeInProgress = true;
-            try {
-              applyReplacementAtRange(view, detail.from, detail.to, detail.text, {
-                annotations: getAddToHistoryFalse(),
-              });
-            } finally {
-              reviewChangeInProgress = false;
-            }
-          });
-        }
-      }
-    } else if (detail.kind === 'replaceInFile') {
-      if (
-        typeof detail.filePath !== 'string' ||
-        typeof detail.expectedOldText !== 'string' ||
-        typeof detail.text !== 'string'
-      ) {
-        ok = false;
-        error = 'Invalid replaceInFile patch';
-      } else {
-        const originalName = getActiveTabName();
-
-        const activateTargetFile = async () => {
-          const beforeText = view.state.sliceDoc(0, view.state.doc.length);
-          const beforeHash = `${beforeText.length}:${beforeText.slice(0, 64)}:${beforeText.slice(-64)}`;
-          const candidates = Array.from(
-            new Set([detail.filePath.trim(), normalizeFileName(detail.filePath)])
-          ).filter(Boolean);
-
-          for (const candidate of candidates) {
-            // eslint-disable-next-line no-await-in-loop
-            const activated = await tryActivateFileByName(candidate);
-            if (activated) {
-              // eslint-disable-next-line no-await-in-loop
-              await waitForDocChange(beforeHash, 2500);
-              view = getCmView();
-              break;
-            }
-          }
-        };
-
-        const resolveReplacementRange = () => {
-          const rangeFrom =
-            typeof detail.from === 'number' && Number.isFinite(detail.from) ? detail.from : null;
-          const rangeTo =
-            typeof detail.to === 'number' && Number.isFinite(detail.to) ? detail.to : null;
-
-          // Try explicit from/to with content verification
-          if (
-            typeof rangeFrom === 'number' &&
-            typeof rangeTo === 'number' &&
-            rangeTo >= rangeFrom
-          ) {
-            const current = view.state.sliceDoc(rangeFrom, rangeTo);
-            if (current === detail.expectedOldText) {
-              return { ok: true as const, from: rangeFrom, to: rangeTo };
-            }
-            // Offsets don't match content — fall through to indexOf search
-          }
-
-          const full = view.state.sliceDoc(0, view.state.doc.length);
-          const first = full.indexOf(detail.expectedOldText);
-          if (first === -1) {
-            return {
-              ok: false as const,
-              error: 'Expected text not found',
-              retryable: true as const,
-            };
-          }
-          const second = full.indexOf(
-            detail.expectedOldText,
-            first + detail.expectedOldText.length
-          );
-          if (second !== -1) {
-            return {
-              ok: false as const,
-              error: 'Expected text appears multiple times',
-              retryable: false as const,
-            };
-          }
-          return { ok: true as const, from: first, to: first + detail.expectedOldText.length };
-        };
-
-        try {
-          const hasExplicitRange =
-            typeof detail.from === 'number' &&
-            Number.isFinite(detail.from) &&
-            typeof detail.to === 'number' &&
-            Number.isFinite(detail.to) &&
-            detail.to >= detail.from;
-
-          if (!detail.expectedOldText && !hasExplicitRange) {
-            ok = false;
-            error = 'Expected text missing';
-          } else {
-            const targetName = normalizeFileName(detail.filePath);
-            let activated = normalizeFileName(getActiveTabName() ?? '') === targetName;
-            if (!activated) {
-              try {
-                await activateTargetFile();
-                activated = normalizeFileName(getActiveTabName() ?? '') === targetName;
-                if (!activated) {
-                  ok = false;
-                  error = `Open ${targetName} in Overleaf and retry.`;
-                }
-              } catch (err) {
-                ok = false;
-                error = err instanceof Error ? err.message : String(err);
-              }
-            }
-
-            let resolved = ok
-              ? resolveReplacementRange()
-              : ({ ok: false, error: error ?? 'Target file unavailable', retryable: false } as const);
-
-            if (ok && resolved.ok) {
-              const current = view.state.sliceDoc(resolved.from, resolved.to);
-              if (current !== detail.expectedOldText) {
-                if (!activated) {
-                  try {
-                    await activateTargetFile();
-                    activated = true;
-                  } catch (err) {
-                    ok = false;
-                    error = err instanceof Error ? err.message : String(err);
-                  }
-                }
-
-                if (ok) {
-                  const refreshed = resolveReplacementRange();
-                  if (refreshed.ok) {
-                    const refreshedCurrent = view.state.sliceDoc(refreshed.from, refreshed.to);
-                    if (refreshedCurrent !== detail.expectedOldText) {
-                      ok = false;
-                      error = 'Selection changed';
-                    } else {
-                      withProtectedEditBypass(() => {
-                        reviewChangeInProgress = true;
-                        try {
-                          applyReplacementAtRange(
-                            view,
-                            refreshed.from,
-                            refreshed.to,
-                            detail.text,
-                            { annotations: getAddToHistoryFalse() }
-                          );
-                        } finally {
-                          reviewChangeInProgress = false;
-                        }
-                      });
-                    }
-                  } else if (refreshed.error === 'Expected text not found') {
-                    ok = false;
-                    error = `Open ${normalizeFileName(detail.filePath)} in Overleaf and retry.`;
-                  } else {
-                    ok = false;
-                    error = refreshed.error;
-                  }
-                }
-              } else {
-                withProtectedEditBypass(() => {
-                  reviewChangeInProgress = true;
-                  try {
-                    applyReplacementAtRange(
-                      view,
-                      resolved.from as number,
-                      resolved.to as number,
-                      detail.text,
-                      { annotations: getAddToHistoryFalse() }
-                    );
-                  } finally {
-                    reviewChangeInProgress = false;
-                  }
-                });
-              }
-            } else if (ok && !resolved.ok) {
-              ok = false;
-              error =
-                resolved.error === 'Expected text not found'
-                  ? `Open ${normalizeFileName(detail.filePath)} in Overleaf and retry.`
-                  : resolved.error;
-            }
-          }
-        } finally {
-          restoreActiveFile(originalName, getActiveTabName());
-        }
-      }
-    } else {
-      ok = false;
-      error = 'Unsupported apply request kind';
-    }
-  } catch (err) {
-    ok = false;
-    error = err instanceof Error ? err.message : String(err);
-  }
-
-  const response: ApplyResponse = {
-    requestId: detail.requestId,
-    ok,
-    ...(error ? { error } : {}),
-  };
-
-  window.dispatchEvent(new CustomEvent(APPLY_RESPONSE_EVENT, { detail: response }));
-}
-
 
 async function onFileNavigateRequest(event: Event) {
   const detail = (event as CustomEvent<FileNavigateRequest>).detail;
@@ -1278,7 +950,6 @@ export function registerEditorBridge() {
     TARGET_FILE_REQUEST_EVENT,
     onTargetFileRequest as EventListener
   );
-  window.addEventListener(APPLY_REQUEST_EVENT, onApplyRequest as EventListener);
   window.addEventListener(BATCH_REQUEST_EVENT, onBatchRequest as EventListener);
   window.addEventListener(FILE_NAVIGATE_REQUEST_EVENT, onFileNavigateRequest as EventListener);
   window.addEventListener(HISTORY_REQUEST_EVENT, onHistoryRequest as EventListener);

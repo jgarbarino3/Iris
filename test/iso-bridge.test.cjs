@@ -11,6 +11,7 @@ test('ISO content script exposes Ageaf editor bridge', () => {
   assert.match(contents, /ageaf:editor:request/);
   assert.match(contents, /ageaf:editor:response/);
   assert.match(contents, /ageaf:editor:hello:request/);
-  assert.match(contents, /ageaf:editor:apply:request/);
+  assert.match(contents, /ageaf:editor:batch:request/);
+  assert.doesNotMatch(contents, /ageaf:editor:apply:request/);
   assert.match(contents, /createEditorAdapter/);
 });

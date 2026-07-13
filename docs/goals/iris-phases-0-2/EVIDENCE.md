@@ -160,7 +160,7 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - Deterministic Playwright browser gate: 2 passed, including extension-harness RPC persistence, IndexedDB schema version 2, and cross-project `WRONG_PROJECT` denial.
 - Remote GitHub Actions Verify run `29242104581` for commit `ce0a5d4` completed successfully on `codex/iris-phases-0-2`.
 
-### P2-02 — Anchored insertion cutover (implemented, unproven)
+### P2-02 — Anchored insertion cutover (verified)
 
 - One atomic proposal-time bridge snapshot records the Overleaf project ID, canonical file path, file identity when available, cursor offset, full file content, SHA-256, exact prefix/suffix anchors bounded to 256 characters, insertion text, sanitized provenance, and a stable project-scoped idempotency identity before the background-owned transaction is created.
 - Acceptance addresses the recorded transaction and expected revision, asks the initiating tab to preflight the recorded project/file/hash/offset/anchors, persists the computed post-apply hash, records applying intent before dispatch, and sends exactly one acknowledged one-change batch through the existing central editor adapter and main-world bridge. The bridge restores the original active file best-effort after validation/application.
@@ -177,7 +177,26 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - `git diff --check` — passed.
 - `npm --prefix host run verify` and the top-level `npm run verify` reached the host format gate and stopped only because the host glob includes the preserved protected untracked file `host/src/auth/pairing 2.ts`, which is not Prettier-clean. The protected file was not modified or formatted; all substantive host typecheck/test/build gates passed separately.
 - Automated P2-02 verification passed; live authenticated Overleaf smoke remains unproven.
-- P2-02 remains `active`; P2-03 remains `pending` and was not implemented.
+- P2-02 is verified; its live authenticated Overleaf smoke remains unproven.
+
+### P2-03 — Durable selection and file/range replacement cutover (verified)
+
+- Added `src/transactions/durableReplacement.ts` to construct strict replacement proposals and validate one-change batches. Proposals persist exact project ID, canonical file path and file identity when available, recorded range, expected old text, replacement text, base SHA-256, and prefix/suffix anchors bounded to 256 characters. Offset-free file proposals resolve only one exact occurrence; missing or repeated occurrences fail closed.
+- Selection snapshots now include project, canonical file, optional file ID, full proposal-time content, exact offsets, and selected text. File/range proposals read the exact recorded file through the canonical bridge before creating the durable background transaction. Later cursor movement, selection movement, or active-file switching cannot retarget acceptance.
+- `src/iso/contentScript.ts` and `src/main/editorBridge/bridge.ts` extend the existing P2-02 preflight and acknowledged batch-of-one path. Replacement preflight verifies project, canonical file/file ID, base hash, exact range, expected text, bounded anchors, and unique anchor identity before one editor dispatch. The bridge restores the original active file best-effort and caches request/batch execution so duplicate or late delivery produces at most one mutation.
+- Review cards persist only transaction ID/revision/project projections across reload. Inline overlays continue to emit review commands; the panel resolves those commands through durable `get` / `preflight` / `apply` / `reconcile` operations and marks accepted only after the authoritative transaction is `applied` with a persisted sanitized success receipt. Edited replacement text creates a new durable proposal against the frozen original target rather than mutating directly.
+- Removed the panel's direct `applyReplaceRange` / `applyReplaceInFile` acceptance and replay paths, the isolated adapter's legacy apply request/response API, and the main-world bridge's direct/fuzzy replacement writer. No production references remain to those APIs, the old apply event channel, nearest-match search, or overlay-specific mutation code. Native editor undo remains unrelated infrastructure; durable review revert remains deferred to P2-07.
+- Focused replacement/service command — 26 passed, 0 failed, covering proposal/storage reload identity, strict replacement/deletion validation, cross-project denial, valid and malformed receipt handling, pre-dispatch durable intent, restart reconciliation, timeout recovery, cancellation boundaries, and duplicate-dispatch protection.
+- Root `npm test` — 395 CommonJS tests and 31 TypeScript transaction/storage tests passed, 0 failed (426 total).
+- `npm run format:check` — passed.
+- `npm run typecheck` — passed.
+- `npm run build` — passed; Webpack compiled the production extension.
+- `npm --prefix host run typecheck && npm --prefix host test && npm --prefix host run build` — passed; 318 host tests, 0 failed.
+- `npx playwright test --workers=1 --retries=0` — six passed, 0 failed. The deterministic fake-CodeMirror path proves exact recorded selection/file/range mutation despite later UI state changes, original active-file restoration, identical duplicate receipt with one dispatch, fail-closed wrong project/file, collaborator drift/stale hash, expected-text mismatch, missing/ambiguous anchors, extension injection, and transaction IndexedDB persistence across harness reload.
+- `git diff --check` — passed.
+- Top-level `npm run verify` was skipped after `npm --prefix host run format:check` proved the protected untracked `host/src/auth/pairing 2.ts` is the sole host format blocker. The file was not edited or formatted; all other root and host gates passed separately.
+- Automated P2-03 verification passed; live authenticated Overleaf smoke remains unproven.
+- P2-03 is verified; P2-04 is active and was not implemented.
 
 ## Final acceptance
 

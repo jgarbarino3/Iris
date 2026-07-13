@@ -63,6 +63,10 @@ export type StoredPatchReview =
     status?: StoredPatchReviewStatus;
     fileName?: string;
     hasAnimated?: boolean;
+    transactionId?: string;
+    transactionRevision?: number;
+    projectId?: string;
+    transactionError?: string;
   }
   | {
     kind: 'insertAtCursor';
@@ -84,6 +88,10 @@ export type StoredPatchReview =
     lineFrom?: number;
     status?: StoredPatchReviewStatus;
     hasAnimated?: boolean;
+    transactionId?: string;
+    transactionRevision?: number;
+    projectId?: string;
+    transactionError?: string;
   };
 
 export type StoredMessage = {
@@ -346,7 +354,14 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       lineToRaw === undefined ? undefined : Number.isFinite(Number(lineToRaw)) ? Number(lineToRaw) : undefined;
     const fileName = typeof raw.fileName === 'string' ? raw.fileName : typeof raw.file_name === 'string' ? raw.file_name : undefined;
 
-    if (!selection || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < 0 || !text) {
+    if (
+      !selection ||
+      !Number.isFinite(from) ||
+      !Number.isFinite(to) ||
+      from < 0 ||
+      to < 0 ||
+      text == null
+    ) {
       return null;
     }
     return {
@@ -360,6 +375,18 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(status ? { status } : {}),
       ...(fileName ? { fileName } : {}),
       ...(hasAnimated ? { hasAnimated } : {}),
+      ...(typeof raw.transactionId === 'string'
+        ? { transactionId: raw.transactionId }
+        : {}),
+      ...(Number.isInteger(raw.transactionRevision)
+        ? { transactionRevision: raw.transactionRevision }
+        : {}),
+      ...(typeof raw.projectId === 'string'
+        ? { projectId: raw.projectId }
+        : {}),
+      ...(typeof raw.transactionError === 'string'
+        ? { transactionError: raw.transactionError }
+        : {}),
     };
   }
 
@@ -415,6 +442,18 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof to === 'number' ? { to } : {}),
       ...(status ? { status } : {}),
       ...(hasAnimated ? { hasAnimated } : {}),
+      ...(typeof raw.transactionId === 'string'
+        ? { transactionId: raw.transactionId }
+        : {}),
+      ...(Number.isInteger(raw.transactionRevision)
+        ? { transactionRevision: raw.transactionRevision }
+        : {}),
+      ...(typeof raw.projectId === 'string'
+        ? { projectId: raw.projectId }
+        : {}),
+      ...(typeof raw.transactionError === 'string'
+        ? { transactionError: raw.transactionError }
+        : {}),
     };
   }
 

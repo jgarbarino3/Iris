@@ -18,7 +18,8 @@ test('Main editor bridge registers Ageaf events', () => {
   assert.match(contents, /ageaf:editor:request/);
   assert.match(contents, /ageaf:editor:response/);
   assert.match(contents, /ageaf:editor:hello:request/);
-  assert.match(contents, /ageaf:editor:apply:request/);
+  assert.match(contents, /ageaf:editor:batch:request/);
+  assert.doesNotMatch(contents, /ageaf:editor:apply:request/);
   assert.doesNotMatch(contents, /copilot:editor:replace/);
 });
 

@@ -11,8 +11,6 @@ const EVENTS = {
   ready: 'ageaf:editor:ready',
   selectionRequest: 'ageaf:editor:request',
   selectionResponse: 'ageaf:editor:response',
-  applyRequest: 'ageaf:editor:apply:request',
-  applyResponse: 'ageaf:editor:apply:response',
   batchRequest: 'ageaf:editor:batch:request',
   batchResponse: 'ageaf:editor:batch:response',
   insertionTargetRequest: 'ageaf:editor:insertion-target:request',
@@ -35,8 +33,6 @@ export type EditorCapability =
   | 'targetFile'
   | 'navigation'
   | 'applyEditBatch'
-  | 'replaceRange'
-  | 'replaceInFile'
   | 'history';
 
 export type EditorBridgeHealthStatus =
@@ -57,21 +53,6 @@ export type EditorBridgeHealth = {
   activeFile: string | null;
   capabilities: Record<EditorCapability, boolean>;
   reason?: string;
-};
-
-export type ApplyReplaceRangeArgs = {
-  from: number;
-  to: number;
-  expectedOldText: string;
-  text: string;
-};
-
-export type ApplyReplaceInFileArgs = {
-  filePath: string;
-  expectedOldText: string;
-  text: string;
-  from?: number;
-  to?: number;
 };
 
 type BridgeResult = { ok: boolean; error?: string };
@@ -137,10 +118,6 @@ export type EditorAdapter = {
   applyEditBatch: (
     request: ApplyEditBatchRequestV1
   ) => Promise<ApplyEditBatchReceiptV1>;
-  applyReplaceRange: (payload: ApplyReplaceRangeArgs) => Promise<BridgeResult>;
-  applyReplaceInFile: (
-    payload: ApplyReplaceInFileArgs
-  ) => Promise<BridgeResult>;
   navigateToFile: (name: string) => Promise<{ ok: boolean }>;
   undoEditor: () => Promise<BridgeResult>;
   redoEditor: () => Promise<BridgeResult>;
@@ -163,8 +140,6 @@ const EMPTY_CAPABILITIES: Record<EditorCapability, boolean> = {
   targetFile: false,
   navigation: false,
   applyEditBatch: false,
-  replaceRange: false,
-  replaceInFile: false,
   history: false,
 };
 
@@ -207,7 +182,6 @@ export function createEditorAdapter(): EditorAdapter {
     string,
     PendingHandler<TargetFileResultV1>
   >();
-  const applyRequests = new Map<string, PendingHandler<BridgeResult>>();
   const batchRequests = new Map<
     string,
     PendingHandler<ApplyEditBatchReceiptV1>
@@ -251,12 +225,6 @@ export function createEditorAdapter(): EditorAdapter {
       event,
       (detail) => detail as TargetFileResultV1
     )
-  );
-  window.addEventListener(EVENTS.applyResponse, (event) =>
-    onResponse(applyRequests, event, (detail) => ({
-      ok: Boolean(detail.ok),
-      ...(detail.error ? { error: String(detail.error) } : {}),
-    }))
   );
   window.addEventListener(EVENTS.batchResponse, (event) =>
     onResponse(
@@ -473,44 +441,6 @@ export function createEditorAdapter(): EditorAdapter {
       );
     },
 
-    async applyReplaceRange(payload: ApplyReplaceRangeArgs) {
-      try {
-        await requireCapability('replaceRange');
-        const id = requestId();
-        return await request(
-          applyRequests,
-          EVENTS.applyRequest,
-          { requestId: id, kind: 'replaceRange', ...payload },
-          APPLY_TIMEOUT_MS,
-          'Timed out waiting for editor apply response'
-        );
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    },
-
-    async applyReplaceInFile(payload: ApplyReplaceInFileArgs) {
-      try {
-        await requireCapability('replaceInFile');
-        const id = requestId();
-        return await request(
-          applyRequests,
-          EVENTS.applyRequest,
-          { requestId: id, kind: 'replaceInFile', ...payload },
-          APPLY_TIMEOUT_MS,
-          'Timed out waiting for editor apply response'
-        );
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    },
-
     async navigateToFile(name: string) {
       try {
         await requireCapability('navigation');
@@ -570,12 +500,7 @@ export function createEditorAdapter(): EditorAdapter {
     refreshHealth,
     isMutationReady() {
       const current = getHealth();
-      return (
-        current.status === 'ready' &&
-        (current.capabilities.applyEditBatch ||
-          current.capabilities.replaceRange ||
-          current.capabilities.replaceInFile)
-      );
+      return current.status === 'ready' && current.capabilities.applyEditBatch;
     },
   };
 

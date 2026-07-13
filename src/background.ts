@@ -79,7 +79,7 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
       expectedPostApplySha256?: string;
       error?: { code?: unknown };
     }>(context.tabId, {
-      type: 'iris:transaction:preflight-insertion',
+      type: 'iris:transaction:preflight-edit',
       transaction,
     });
     if (
@@ -89,7 +89,7 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
     ) {
       throw new TransactionError(
         sanitizeFailureCode(response?.error?.code),
-        'Insertion preflight failed'
+        'Edit preflight failed'
       );
     }
     return {

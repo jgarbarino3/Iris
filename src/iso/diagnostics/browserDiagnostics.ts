@@ -87,10 +87,7 @@ export async function runBrowserDiagnostics(
     : null;
   const bridgeReady = bridgeHealth?.status === 'ready';
   const mutationReady = Boolean(
-    bridgeReady &&
-      (bridgeHealth.capabilities.applyEditBatch ||
-        bridgeHealth.capabilities.replaceRange ||
-        bridgeHealth.capabilities.replaceInFile)
+    bridgeReady && bridgeHealth.capabilities.applyEditBatch
   );
   const selection = bridgeReady
     ? await probeSelection(dependencies.requestSelection)

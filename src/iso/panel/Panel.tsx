@@ -44,7 +44,9 @@ import { runBrowserDiagnostics } from '../diagnostics/browserDiagnostics';
 import {
   buildAnchoredInsertionProposal,
   canonicalFilePath,
+  sha256Text,
 } from '../../transactions/anchoredInsertion';
+import { buildDurableReplacementProposal } from '../../transactions/durableReplacement';
 import type {
   EditTransactionV1,
   TransactionRuntimeActionV1,
@@ -764,6 +766,10 @@ type Patch =
   };
 
 type SelectionSnapshot = {
+  projectId?: string;
+  filePath?: string;
+  fileId?: string;
+  content?: string;
   selection: string;
   from: number;
   to: number;
@@ -773,16 +779,6 @@ type SelectionSnapshot = {
 };
 
 type PatchReviewStatus = 'pending' | 'accepted' | 'rejected';
-
-type ReviewActionHistoryEntry = {
-  messageId: string;
-  action: 'accept' | 'reject';
-  prevStatus: PatchReviewStatus;
-  nextStatus: PatchReviewStatus;
-  patchKind: StoredPatchReview['kind'];
-  appliedText?: string;
-  editorHistoryMarker?: number;
-};
 
 type ToolRequest = {
   kind: 'approval' | 'user_input';
@@ -1001,8 +997,6 @@ const Panel = () => {
   const pendingPatchFeedbackTargetRef = useRef<PatchFeedbackTarget | null>(
     null
   );
-  const reviewUndoStackRef = useRef<ReviewActionHistoryEntry[]>([]);
-  const reviewRedoStackRef = useRef<ReviewActionHistoryEntry[]>([]);
   const [toolRequests, setToolRequests] = useState<ToolRequest[]>([]);
   const [toolRequestInputs, setToolRequestInputs] = useState<
     Record<string, string>
@@ -5114,7 +5108,7 @@ const Panel = () => {
                   hunks={hunks}
                   busy={bulkActionBusy || Boolean(patchActionBusyId)}
                   onAcceptAll={() => void onAcceptFilePatches(fileKey)}
-                  onRejectAll={() => onRejectFilePatches(fileKey)}
+                  onRejectAll={() => void onRejectFilePatches(fileKey)}
                   onFeedback={(messageId) =>
                     onFeedbackPatchReviewMessage(messageId)
                   }
@@ -7313,6 +7307,18 @@ const Panel = () => {
         signal: abortController.signal,
       });
       const selectionSnapshot: SelectionSnapshot = {
+        projectId:
+          typeof selection?.projectId === 'string'
+            ? selection.projectId
+            : undefined,
+        filePath:
+          typeof selection?.filePath === 'string'
+            ? canonicalFilePath(selection.filePath)
+            : undefined,
+        fileId:
+          typeof selection?.fileId === 'string' ? selection.fileId : undefined,
+        content:
+          typeof selection?.content === 'string' ? selection.content : undefined,
         selection:
           typeof selection?.selection === 'string' ? selection.selection : '',
         from: typeof selection?.from === 'number' ? selection.from : 0,
@@ -7464,6 +7470,209 @@ const Panel = () => {
               status: 'pending',
               transactionError:
                 error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      };
+
+      const captureReplacementPatchMessage = async (
+        patch:
+          | { kind: 'replaceSelection'; text: string; snapshot: SelectionSnapshot }
+          | {
+              kind: 'replaceRangeInFile';
+              filePath: string;
+              expectedOldText: string;
+              text: string;
+              from?: number;
+              to?: number;
+              lineFrom?: number;
+            }
+      ): Promise<StoredMessage> => {
+        const projectId = getOverleafProjectIdFromPathname(
+          window.location.pathname
+        );
+        try {
+          const bridge = window.ageafBridge;
+          if (!projectId || !bridge) {
+            throw new Error('Missing project or editor identity');
+          }
+
+          let filePath: string;
+          let fileId: string | undefined;
+          let content: string;
+          let expectedText: string;
+          let from: number | undefined;
+          let to: number | undefined;
+          if (patch.kind === 'replaceSelection') {
+            const snapshot = patch.snapshot;
+            filePath = canonicalFilePath(snapshot.filePath ?? '');
+            fileId = snapshot.fileId;
+            content = snapshot.content ?? '';
+            expectedText = snapshot.selection;
+            from = snapshot.from;
+            to = snapshot.to;
+            if (
+              snapshot.projectId !== projectId ||
+              !filePath ||
+              typeof snapshot.content !== 'string' ||
+              !(snapshot.to > snapshot.from) ||
+              !expectedText
+            ) {
+              throw new Error('Missing proposal-time selection identity');
+            }
+          } else {
+            filePath = canonicalFilePath(patch.filePath);
+            expectedText = patch.expectedOldText;
+            if (!filePath || !expectedText) {
+              throw new Error('Missing proposal-time file/range identity');
+            }
+            const target = await bridge.requestTargetFile({
+              projectId,
+              filePath,
+            });
+            if (
+              !target?.ok ||
+              target.projectId !== projectId ||
+              canonicalFilePath(target.filePath) !== filePath ||
+              typeof target.content !== 'string'
+            ) {
+              throw new Error(
+                target?.error ?? 'Unable to capture the recorded replacement file'
+              );
+            }
+            filePath = canonicalFilePath(target.filePath);
+            fileId = target.fileId;
+            content = target.content;
+            from = patch.from;
+            to = patch.to;
+          }
+
+          if (
+            getOverleafProjectIdFromPathname(window.location.pathname) !==
+            projectId
+          ) {
+            throw new Error('Proposal target identity changed during capture');
+          }
+          const proposal = await buildDurableReplacementProposal({
+            projectId,
+            filePath,
+            ...(fileId ? { fileId } : {}),
+            content,
+            ...(typeof from === 'number' ? { from } : {}),
+            ...(typeof to === 'number' ? { to } : {}),
+            expectedText,
+            replacementText: patch.text,
+            idempotencySeed: `${sessionConversationId}:${jobId}:${patch.kind}:${filePath}:${from ?? ''}:${to ?? ''}`,
+            conversationId: sessionConversationId,
+            sourceJobId: jobId,
+            provenance: {
+              provider,
+              ...(currentModel ? { model: currentModel } : {}),
+              requestSummary:
+                patch.kind === 'replaceSelection'
+                  ? 'Replace recorded selection'
+                  : 'Replace recorded range in file',
+              contextCategories: [
+                'project',
+                'canonical-file',
+                'exact-range',
+                'expected-text',
+                'adjacent-anchors',
+              ],
+            },
+          });
+          const transaction = await transactionRpc<EditTransactionV1>(
+            'propose',
+            proposal
+          );
+
+          if (patch.kind === 'replaceSelection') {
+            return {
+              role: 'system',
+              content: '',
+              patchReview: {
+                kind: 'replaceSelection',
+                selection: transaction.expectedText,
+                from: transaction.target.from,
+                to: transaction.target.to,
+                ...(typeof patch.snapshot.lineFrom === 'number'
+                  ? { lineFrom: patch.snapshot.lineFrom }
+                  : {}),
+                ...(typeof patch.snapshot.lineTo === 'number'
+                  ? { lineTo: patch.snapshot.lineTo }
+                  : {}),
+                text: patch.text,
+                status: 'pending',
+                fileName: transaction.target.filePath,
+                transactionId: transaction.id,
+                transactionRevision: transaction.revision,
+                projectId: transaction.projectId,
+              },
+            };
+          }
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'replaceRangeInFile',
+              filePath: transaction.target.filePath,
+              expectedOldText: transaction.expectedText,
+              text: patch.text,
+              from: transaction.target.from,
+              to: transaction.target.to,
+              ...(typeof patch.lineFrom === 'number'
+                ? { lineFrom: patch.lineFrom }
+                : {}),
+              status: 'pending',
+              transactionId: transaction.id,
+              transactionRevision: transaction.revision,
+              projectId: transaction.projectId,
+            },
+          };
+        } catch (error) {
+          const transactionError =
+            error instanceof Error ? error.message : String(error);
+          if (patch.kind === 'replaceSelection') {
+            return {
+              role: 'system',
+              content: '',
+              patchReview: {
+                kind: 'replaceSelection',
+                selection: patch.snapshot.selection,
+                from: patch.snapshot.from,
+                to: patch.snapshot.to,
+                ...(typeof patch.snapshot.lineFrom === 'number'
+                  ? { lineFrom: patch.snapshot.lineFrom }
+                  : {}),
+                ...(typeof patch.snapshot.lineTo === 'number'
+                  ? { lineTo: patch.snapshot.lineTo }
+                  : {}),
+                text: patch.text,
+                status: 'pending',
+                ...(patch.snapshot.fileName
+                  ? { fileName: patch.snapshot.fileName }
+                  : {}),
+                ...(projectId ? { projectId } : {}),
+                transactionError,
+              },
+            };
+          }
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'replaceRangeInFile',
+              filePath: patch.filePath,
+              expectedOldText: patch.expectedOldText,
+              text: patch.text,
+              ...(typeof patch.from === 'number' ? { from: patch.from } : {}),
+              ...(typeof patch.to === 'number' ? { to: patch.to } : {}),
+              ...(typeof patch.lineFrom === 'number'
+                ? { lineFrom: patch.lineFrom }
+                : {}),
+              status: 'pending',
+              ...(projectId ? { projectId } : {}),
+              transactionError,
             },
           };
         }
@@ -8047,7 +8256,6 @@ const Panel = () => {
               return;
             }
 
-            let storedPatchReviewMessage: StoredMessage | null = null;
             if (patch.kind === 'replaceSelection') {
               const snapshot = selectionSnapshotsRef.current.get(jobId) ?? null;
               selectionSnapshotsRef.current.delete(jobId);
@@ -8057,55 +8265,33 @@ const Panel = () => {
                 console.trace('[ageaf] discarding replaceSelection patch: no valid selection snapshot');
                 return;
               }
-              storedPatchReviewMessage = {
-                role: 'system',
-                content: '',
-                patchReview: {
-                  kind: 'replaceSelection',
-                  selection: snapshot.selection,
-                  from: snapshot.from,
-                  to: snapshot.to,
-                  ...(typeof snapshot.lineFrom === 'number'
-                    ? { lineFrom: snapshot.lineFrom }
-                    : {}),
-                  ...(typeof snapshot.lineTo === 'number'
-                    ? { lineTo: snapshot.lineTo }
-                    : {}),
-                  text: patch.text,
-                  status: 'pending',
-                  ...(snapshot.fileName
-                    ? { fileName: snapshot.fileName }
-                    : {}),
-                },
-              };
+              void captureReplacementPatchMessage({
+                kind: 'replaceSelection',
+                text: patch.text,
+                snapshot,
+              }).then(commitPatchReviewMessage);
+              return;
             } else if (patch.kind === 'replaceRangeInFile') {
-              storedPatchReviewMessage = {
-                role: 'system',
-                content: '',
-                patchReview: {
-                  kind: 'replaceRangeInFile',
-                  filePath: patch.filePath,
-                  expectedOldText: patch.expectedOldText,
-                  text: patch.text,
-                  ...(typeof patch.from === 'number'
-                    ? { from: patch.from }
-                    : {}),
-                  ...(typeof patch.to === 'number' ? { to: patch.to } : {}),
-                  ...(typeof patch.lineFrom === 'number'
-                    ? { lineFrom: patch.lineFrom }
-                    : {}),
-                  status: 'pending',
-                },
-              };
+              void captureReplacementPatchMessage({
+                kind: 'replaceRangeInFile',
+                filePath: patch.filePath,
+                expectedOldText: patch.expectedOldText,
+                text: patch.text,
+                ...(typeof patch.from === 'number'
+                  ? { from: patch.from }
+                  : {}),
+                ...(typeof patch.to === 'number' ? { to: patch.to } : {}),
+                ...(typeof patch.lineFrom === 'number'
+                  ? { lineFrom: patch.lineFrom }
+                  : {}),
+              }).then(commitPatchReviewMessage);
+              return;
             } else if (patch.kind === 'insertAtCursor') {
               void captureInsertionPatchMessage(patch.text).then(
                 commitPatchReviewMessage
               );
               return;
             }
-
-            if (!storedPatchReviewMessage) return;
-            commitPatchReviewMessage(storedPatchReviewMessage);
           }
 
           if (event.event === 'done') {
@@ -9002,30 +9188,6 @@ const Panel = () => {
     );
   };
 
-  const setPatchReviewStatus = (
-    messageId: string,
-    status: PatchReviewStatus
-  ) => {
-    updatePatchReviewMessage(
-      messageId,
-      (patchReview) => ({ ...patchReview, status } as any)
-    );
-  };
-
-  const setPatchReviewTextAndStatus = (
-    messageId: string,
-    status: PatchReviewStatus,
-    nextText?: string
-  ) => {
-    updatePatchReviewMessage(messageId, (patchReview) => {
-      const updated: any = { ...patchReview, status };
-      if (typeof nextText === 'string' && 'text' in patchReview) {
-        updated.text = nextText;
-      }
-      return updated as StoredPatchReview;
-    });
-  };
-
   const clearPatchErrorForMessage = (messageId: string) => {
     setPatchActionErrors((prev) => {
       const { [messageId]: _removed, ...rest } = prev;
@@ -9033,193 +9195,12 @@ const Panel = () => {
     });
   };
 
-  const recordReviewAction = (entry: ReviewActionHistoryEntry) => {
-    reviewUndoStackRef.current.push({
-      ...entry,
-      editorHistoryMarker:
-        typeof entry.editorHistoryMarker === 'number'
-          ? entry.editorHistoryMarker
-          : window.ageafBridge?.getEditorHistoryMarker?.() ?? 0,
-    });
-    reviewRedoStackRef.current = [];
-  };
-
-  const applyReviewAcceptHistory = async (
-    entry: ReviewActionHistoryEntry,
-    patchReview: StoredPatchReview,
-    direction: 'undo' | 'redo'
-  ) => {
-    const appliedText =
-      typeof entry.appliedText === 'string'
-        ? entry.appliedText
-        : 'text' in patchReview
-          ? patchReview.text
-          : '';
-
-    if (patchReview.kind === 'replaceSelection') {
-      if (!window.ageafBridge?.applyReplaceRange) {
-        return { ok: false, error: 'Apply bridge unavailable' };
-      }
-      const result =
-        direction === 'undo'
-          ? await window.ageafBridge.applyReplaceRange({
-            from: patchReview.from,
-            to: patchReview.to,
-            expectedOldText: appliedText,
-            text: patchReview.selection,
-          })
-          : await window.ageafBridge.applyReplaceRange({
-            from: patchReview.from,
-            to: patchReview.to,
-            expectedOldText: patchReview.selection,
-            text: appliedText,
-          });
-      return {
-        ok: Boolean(result?.ok),
-        ...(result?.ok
-          ? {}
-          : {
-            error:
-              result?.error ??
-              `Unable to ${direction} accepted change`,
-          }),
-      };
-    }
-
-    if (patchReview.kind === 'replaceRangeInFile') {
-      if (!window.ageafBridge?.applyReplaceInFile) {
-        return { ok: false, error: 'Apply bridge unavailable' };
-      }
-      const result =
-        direction === 'undo'
-          ? await window.ageafBridge.applyReplaceInFile({
-            filePath: patchReview.filePath,
-            expectedOldText: appliedText,
-            text: patchReview.expectedOldText,
-            ...(typeof patchReview.from === 'number'
-              ? { from: patchReview.from }
-              : {}),
-            ...(typeof patchReview.to === 'number'
-              ? { to: patchReview.to }
-              : {}),
-          })
-          : await window.ageafBridge.applyReplaceInFile({
-            filePath: patchReview.filePath,
-            expectedOldText: patchReview.expectedOldText,
-            text: appliedText,
-            ...(typeof patchReview.from === 'number'
-              ? { from: patchReview.from }
-              : {}),
-            ...(typeof patchReview.to === 'number'
-              ? { to: patchReview.to }
-              : {}),
-          });
-      return {
-        ok: Boolean(result?.ok),
-        ...(result?.ok
-          ? {}
-          : {
-            error:
-              result?.error ??
-              `Unable to ${direction} accepted change`,
-          }),
-      };
-    }
-
-    if (patchReview.kind === 'insertAtCursor') {
-      if (direction === 'undo') {
-        if (!window.ageafBridge?.undoEditor) {
-          return { ok: false, error: 'Undo bridge unavailable' };
-        }
-        return await window.ageafBridge.undoEditor();
-      }
-      if (window.ageafBridge?.redoEditor) {
-        return await window.ageafBridge.redoEditor();
-      }
-      return { ok: false, error: 'Redo bridge unavailable' };
-    }
-
-    return { ok: false, error: 'Unsupported patch kind' };
-  };
-
-  const executeReviewUndo = async () => {
-    if (bulkActionBusy || patchActionBusyId) return false;
-    const entry = reviewUndoStackRef.current.pop();
-    if (!entry) return false;
-
-    const latest = messagesRef.current.find((message) => message.id === entry.messageId);
-    if (!latest?.patchReview) {
-      return false;
-    }
-
-    if (entry.action === 'accept') {
-      const result = await applyReviewAcceptHistory(
-        entry,
-        latest.patchReview,
-        'undo'
-      );
-      if (!result?.ok) {
-        reviewUndoStackRef.current.push(entry);
-        setPatchActionErrors((prev) => ({
-          ...prev,
-          [entry.messageId]: result?.error ?? 'Unable to undo accepted change',
-        }));
-        return false;
-      }
-    }
-
-    setPatchReviewTextAndStatus(
-      entry.messageId,
-      entry.prevStatus,
-      entry.appliedText
-    );
-    clearPatchErrorForMessage(entry.messageId);
-    reviewRedoStackRef.current.push(entry);
-    return true;
-  };
-
-  const executeReviewRedo = async () => {
-    if (bulkActionBusy || patchActionBusyId) return false;
-    const entry = reviewRedoStackRef.current.pop();
-    if (!entry) return false;
-
-    const latest = messagesRef.current.find((message) => message.id === entry.messageId);
-    if (!latest?.patchReview) {
-      return false;
-    }
-
-    if (entry.action === 'accept') {
-      const result = await applyReviewAcceptHistory(
-        entry,
-        latest.patchReview,
-        'redo'
-      );
-      if (!result?.ok) {
-        reviewRedoStackRef.current.push(entry);
-        setPatchActionErrors((prev) => ({
-          ...prev,
-          [entry.messageId]: result?.error ?? 'Unable to redo accepted change',
-        }));
-        return false;
-      }
-    }
-
-    setPatchReviewTextAndStatus(
-      entry.messageId,
-      entry.nextStatus,
-      entry.appliedText
-    );
-    clearPatchErrorForMessage(entry.messageId);
-    reviewUndoStackRef.current.push(entry);
-    return true;
-  };
-
-  const rejectInsertionTransaction = async (
-    patchReview: StoredPatchReview & { kind: 'insertAtCursor' }
+  const getDurableReviewTransaction = async (
+    patchReview: StoredPatchReview
   ): Promise<EditTransactionV1> => {
     if (!patchReview.transactionId || !patchReview.projectId) {
       throw new Error(
-        patchReview.transactionError ?? 'Insertion target identity is unavailable'
+        patchReview.transactionError ?? 'Durable edit target identity is unavailable'
       );
     }
     let transaction = await transactionRpc<EditTransactionV1 | null>('get', {
@@ -9227,7 +9208,7 @@ const Panel = () => {
       id: patchReview.transactionId,
     });
     if (!transaction) {
-      throw new Error('Durable insertion transaction is missing');
+      throw new Error('Durable edit transaction is missing');
     }
     if (transaction.state === 'applying') {
       await transactionRpc<EditTransactionV1[]>('reconcile', {
@@ -9239,10 +9220,17 @@ const Panel = () => {
       });
     }
     if (!transaction) {
-      throw new Error('Durable insertion transaction is missing');
+      throw new Error('Durable edit transaction is missing');
     }
+    return transaction;
+  };
+
+  const rejectDurableReviewTransaction = async (
+    patchReview: StoredPatchReview
+  ): Promise<EditTransactionV1> => {
+    let transaction = await getDurableReviewTransaction(patchReview);
     if (transaction.state === 'applied') {
-      throw new Error('Applied insertion cannot be cancelled');
+      throw new Error('Applied edit cannot be cancelled');
     }
     if (transaction.state !== 'rejected') {
       transaction = await transactionRpc<EditTransactionV1>('reject', {
@@ -9252,7 +9240,7 @@ const Panel = () => {
       });
     }
     if (transaction.state !== 'rejected') {
-      throw new Error('Insertion rejection was not persisted');
+      throw new Error('Edit rejection was not persisted');
     }
     return transaction;
   };
@@ -9264,45 +9252,25 @@ const Panel = () => {
     if (!patchReview) return;
     const prevStatus = ((patchReview as any).status ?? 'pending') as PatchReviewStatus;
     if (prevStatus !== 'pending') return;
-    if (
-      patchReview.kind === 'insertAtCursor' &&
-      patchReview.transactionId &&
-      patchReview.projectId
-    ) {
-      setPatchActionBusyId(messageId);
-      try {
-        const transaction = await rejectInsertionTransaction(patchReview);
-        updatePatchReviewMessage(messageId, (current) =>
-          current.kind === 'insertAtCursor'
-            ? {
-                ...current,
-                status: 'rejected',
-                transactionRevision: transaction!.revision,
-                transactionError: undefined,
-              }
-            : current
-        );
-      } catch (error) {
-        setPatchActionErrors((previous) => ({
-          ...previous,
-          [messageId]:
-            error instanceof Error ? error.message : String(error),
-        }));
-        return;
-      } finally {
-        setPatchActionBusyId(null);
-      }
-    } else {
-      setPatchReviewStatus(messageId, 'rejected');
+    setPatchActionBusyId(messageId);
+    try {
+      const transaction = await rejectDurableReviewTransaction(patchReview);
+      updatePatchReviewMessage(messageId, (current) => ({
+        ...current,
+        status: 'rejected',
+        transactionRevision: transaction.revision,
+        transactionError: undefined,
+      }));
+    } catch (error) {
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        [messageId]: error instanceof Error ? error.message : String(error),
+      }));
+      return;
+    } finally {
+      setPatchActionBusyId(null);
     }
     clearPatchErrorForMessage(messageId);
-    recordReviewAction({
-      messageId,
-      action: 'reject',
-      prevStatus,
-      nextStatus: 'rejected',
-      patchKind: patchReview.kind,
-    });
   };
 
   const onFeedbackPatchReviewMessage = (
@@ -9391,165 +9359,110 @@ const Panel = () => {
     clearPatchErrorForMessage(messageId);
 
     try {
-      if (patchReview.kind === 'replaceSelection') {
-        if (!window.ageafBridge?.applyReplaceRange) {
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]: 'Apply bridge unavailable',
-          }));
-          return false;
-        }
-        const nextText =
-          typeof overrideText === 'string' ? overrideText : patchReview.text;
-        const result = await window.ageafBridge.applyReplaceRange({
-          from: patchReview.from,
-          to: patchReview.to,
-          expectedOldText: patchReview.selection,
-          text: nextText,
-        });
-        if (!result?.ok) {
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]: result?.error ?? 'Selection changed',
-          }));
-          return false;
-        }
-        setPatchReviewTextAndStatus(messageId, 'accepted', nextText);
-        return true;
+      const nextText =
+        typeof overrideText === 'string' ? overrideText : patchReview.text;
+      let transaction = await getDurableReviewTransaction(patchReview);
+      if (
+        transaction.state === 'proposed' &&
+        typeof patchReview.transactionRevision === 'number' &&
+        transaction.revision !== patchReview.transactionRevision
+      ) {
+        throw new Error('Durable edit proposal revision is stale');
       }
-
-      if (patchReview.kind === 'replaceRangeInFile') {
-        if (!window.ageafBridge?.applyReplaceInFile) {
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]: 'Apply bridge unavailable',
-          }));
-          return false;
+      if (transaction.replacementText !== nextText) {
+        if (patchReview.kind === 'insertAtCursor') {
+          throw new Error('Edited insertion text requires a new proposal');
         }
-        const nextText =
-          typeof overrideText === 'string' ? overrideText : patchReview.text;
-        const result = await window.ageafBridge.applyReplaceInFile({
-          filePath: patchReview.filePath,
-          expectedOldText: patchReview.expectedOldText,
-          text: nextText,
-          ...(typeof patchReview.from === 'number'
-            ? { from: patchReview.from }
+        const replacementIdentity = await sha256Text(nextText);
+        const previous = transaction;
+        transaction = await transactionRpc<EditTransactionV1>('propose', {
+          idempotencyKey: `${previous.idempotencyKey}:text:${replacementIdentity}`,
+          projectId: previous.projectId,
+          ...(previous.conversationId
+            ? { conversationId: previous.conversationId }
             : {}),
-          ...(typeof patchReview.to === 'number' ? { to: patchReview.to } : {}),
+          ...(previous.missionId ? { missionId: previous.missionId } : {}),
+          ...(previous.sourceJobId
+            ? { sourceJobId: previous.sourceJobId }
+            : {}),
+          intent: 'replace',
+          target: previous.target,
+          expectedText: previous.expectedText,
+          replacementText: nextText,
+          prefix: previous.prefix,
+          suffix: previous.suffix,
+          baseContentSha256: previous.baseContentSha256,
+          proposalOrder: previous.proposalOrder,
+          ...(previous.provenance ? { provenance: previous.provenance } : {}),
         });
-        if (!result?.ok) {
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]: result?.error ?? 'Unable to apply patch',
-          }));
-          return false;
-        }
-        setPatchReviewTextAndStatus(messageId, 'accepted', nextText);
-        return true;
-      }
-
-      if (patchReview.kind === 'insertAtCursor') {
-        const nextText =
-          typeof overrideText === 'string' ? overrideText : patchReview.text;
-        if (
-          !patchReview.transactionId ||
-          typeof patchReview.transactionRevision !== 'number' ||
-          !patchReview.projectId ||
-          patchReview.transactionError ||
-          nextText !== patchReview.text
-        ) {
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]:
-              patchReview.transactionError ??
-              (nextText !== patchReview.text
-                ? 'Edited insertion text requires a new proposal'
-                : 'Insertion target identity is unavailable'),
-          }));
-          return false;
-        }
-        let transaction = await transactionRpc<EditTransactionV1 | null>(
-          'get',
-          {
-            projectId: patchReview.projectId,
-            id: patchReview.transactionId,
-          }
-        );
-        if (!transaction) {
-          throw new Error('Durable insertion transaction is missing');
-        }
-        if (
-          transaction.state === 'proposed' &&
-          transaction.revision !== patchReview.transactionRevision
-        ) {
-          throw new Error('Insertion proposal revision is stale');
-        }
-        if (transaction.state === 'proposed') {
-          transaction = await transactionRpc<EditTransactionV1>('preflight', {
-            projectId: patchReview.projectId,
-            id: patchReview.transactionId,
-            expectedRevision: transaction.revision,
-          });
-        }
-        if (transaction.state === 'preflighted') {
-          transaction = await transactionRpc<EditTransactionV1>('apply', {
-            projectId: patchReview.projectId,
-            id: patchReview.transactionId,
-            expectedRevision: transaction.revision,
-          });
-        }
-        if (transaction.state === 'applying') {
-          await transactionRpc<EditTransactionV1[]>('reconcile', {
-            projectId: patchReview.projectId,
-          });
-          transaction = await transactionRpc<EditTransactionV1 | null>(
-            'get',
-            {
-              projectId: patchReview.projectId,
-              id: patchReview.transactionId,
-            }
-          );
-          if (!transaction) {
-            throw new Error('Durable insertion transaction is missing');
+        updatePatchReviewMessage(messageId, (current) => ({
+          ...current,
+          text: nextText,
+          transactionId: transaction.id,
+          transactionRevision: transaction.revision,
+          projectId: transaction.projectId,
+          transactionError: undefined,
+        }));
+        if (previous.state === 'proposed' && previous.id !== transaction.id) {
+          try {
+            await transactionRpc<EditTransactionV1>('reject', {
+              projectId: previous.projectId,
+              id: previous.id,
+              expectedRevision: previous.revision,
+            });
+          } catch {
+            // The new transaction is authoritative for this card projection.
           }
         }
-        if (!transaction) {
-          throw new Error('Durable insertion transaction is missing');
-        }
-        const resolvedTransaction = transaction;
-        if (
-          resolvedTransaction.state !== 'applied' ||
-          resolvedTransaction.receipt?.success !== true
-        ) {
-          const failureMessage =
-            resolvedTransaction.failure?.message ??
-            'Insertion was not acknowledged by a durable receipt';
-          setPatchActionErrors((prev) => ({
-            ...prev,
-            [messageId]: failureMessage,
-          }));
-          return false;
-        }
-        const appliedTransaction = resolvedTransaction;
-        updatePatchReviewMessage(messageId, (current) =>
-          current.kind === 'insertAtCursor'
-            ? {
-                ...current,
-                text: nextText,
-                status: 'accepted',
-                transactionRevision: appliedTransaction.revision,
-                transactionError: undefined,
-              }
-            : current
-        );
-        return true;
       }
 
-      setPatchActionErrors((prev) => ({
-        ...prev,
-        [messageId]: 'Unsupported patch kind',
+      if (transaction.state === 'proposed') {
+        transaction = await transactionRpc<EditTransactionV1>('preflight', {
+          projectId: transaction.projectId,
+          id: transaction.id,
+          expectedRevision: transaction.revision,
+        });
+      }
+      if (transaction.state === 'preflighted') {
+        transaction = await transactionRpc<EditTransactionV1>('apply', {
+          projectId: transaction.projectId,
+          id: transaction.id,
+          expectedRevision: transaction.revision,
+        });
+      }
+      if (transaction.state === 'applying') {
+        await transactionRpc<EditTransactionV1[]>('reconcile', {
+          projectId: transaction.projectId,
+        });
+        const reconciledTransaction = await transactionRpc<EditTransactionV1 | null>('get', {
+          projectId: transaction.projectId,
+          id: transaction.id,
+        });
+        if (!reconciledTransaction) {
+          throw new Error('Durable edit transaction is missing');
+        }
+        transaction = reconciledTransaction;
+      }
+      if (
+        transaction.state !== 'applied' ||
+        transaction.receipt?.success !== true
+      ) {
+        throw new Error(
+          transaction.failure?.message ??
+            'Edit was not acknowledged by a durable receipt'
+        );
+      }
+      const appliedTransaction = transaction;
+      updatePatchReviewMessage(messageId, (current) => ({
+        ...current,
+        text: nextText,
+        status: 'accepted',
+        transactionId: appliedTransaction.id,
+        transactionRevision: appliedTransaction.revision,
+        projectId: appliedTransaction.projectId,
+        transactionError: undefined,
       }));
-      return false;
+      return true;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to apply patch';
@@ -9571,23 +9484,7 @@ const Panel = () => {
 
     setPatchActionBusyId(messageId);
     try {
-      const accepted = await acceptSinglePatch(messageId, patchReview, overrideText);
-      if (accepted) {
-        const appliedText =
-          typeof overrideText === 'string'
-            ? overrideText
-            : 'text' in patchReview
-              ? patchReview.text
-              : undefined;
-        recordReviewAction({
-          messageId,
-          action: 'accept',
-          prevStatus: status,
-          nextStatus: 'accepted',
-          patchKind: patchReview.kind,
-          ...(typeof appliedText === 'string' ? { appliedText } : {}),
-        });
-      }
+      await acceptSinglePatch(messageId, patchReview, overrideText);
     } finally {
       setPatchActionBusyId(null);
     }
@@ -9642,21 +9539,8 @@ const Panel = () => {
           if (!latest?.patchReview) continue;
           const latestStatus = (latest.patchReview as any).status ?? 'pending';
           if (latestStatus !== 'pending') continue;
-          const appliedText =
-            'text' in latest.patchReview ? latest.patchReview.text : undefined;
-
           try {
-            const accepted = await acceptSinglePatch(latest.id, latest.patchReview);
-            if (accepted) {
-              recordReviewAction({
-                messageId: latest.id,
-                action: 'accept',
-                prevStatus: latestStatus as PatchReviewStatus,
-                nextStatus: 'accepted',
-                patchKind: latest.patchReview.kind,
-                ...(typeof appliedText === 'string' ? { appliedText } : {}),
-              });
-            }
+            await acceptSinglePatch(latest.id, latest.patchReview);
           } catch {
             // Continue processing remaining hunks.
           }
@@ -9685,29 +9569,14 @@ const Panel = () => {
         const prevStatus = ((patchReview as any).status ??
           'pending') as PatchReviewStatus;
         try {
-          if (patchReview.kind === 'insertAtCursor') {
-            const transaction = await rejectInsertionTransaction(patchReview);
-            updatePatchReviewMessage(entry.id, (current) =>
-              current.kind === 'insertAtCursor'
-                ? {
-                    ...current,
-                    status: 'rejected',
-                    transactionRevision: transaction.revision,
-                    transactionError: undefined,
-                  }
-                : current
-            );
-          } else {
-            setPatchReviewStatus(entry.id, 'rejected');
-          }
+          const transaction = await rejectDurableReviewTransaction(patchReview);
+          updatePatchReviewMessage(entry.id, (current) => ({
+            ...current,
+            status: 'rejected',
+            transactionRevision: transaction.revision,
+            transactionError: undefined,
+          }));
           clearPatchErrorForMessage(entry.id);
-          recordReviewAction({
-            messageId: entry.id,
-            action: 'reject',
-            prevStatus,
-            nextStatus: 'rejected',
-            patchKind: patchReview.kind,
-          });
         } catch (error) {
           setPatchActionErrors((previous) => ({
             ...previous,
@@ -9760,22 +9629,8 @@ const Panel = () => {
 
       for (const message of pendingMessages) {
         if (!message.patchReview) continue;
-        const appliedText =
-          'text' in message.patchReview ? message.patchReview.text : undefined;
-        const prevStatus = ((message.patchReview as any).status ??
-          'pending') as PatchReviewStatus;
         try {
-          const accepted = await acceptSinglePatch(message.id, message.patchReview);
-          if (accepted) {
-            recordReviewAction({
-              messageId: message.id,
-              action: 'accept',
-              prevStatus,
-              nextStatus: 'accepted',
-              patchKind: message.patchReview.kind,
-              ...(typeof appliedText === 'string' ? { appliedText } : {}),
-            });
-          }
+          await acceptSinglePatch(message.id, message.patchReview);
         } catch {
           // Continue processing remaining hunks in this file.
         }
@@ -9786,7 +9641,7 @@ const Panel = () => {
     }
   };
 
-  const onRejectFilePatches = (fileKey: string) => {
+  const onRejectFilePatches = async (fileKey: string) => {
     if (bulkActionBusy || patchActionBusyId) return;
     const pendingEntries = messagesRef.current
       .filter((entry) => {
@@ -9798,53 +9653,33 @@ const Panel = () => {
         const status = (patchReview as any).status ?? 'pending';
         return status === 'pending';
       })
-      .map((entry) => ({
-        messageId: entry.id,
-        patchKind: entry.patchReview!.kind,
-        prevStatus: ((entry.patchReview as any).status ??
-          'pending') as PatchReviewStatus,
-      }));
-    const ids = new Set(pendingEntries.map((entry) => entry.messageId));
-    if (ids.size === 0) return;
-    setMessages((prev) =>
-      prev.map((message) => {
-        if (!ids.has(message.id)) return message;
-        if (!message.patchReview) return message;
-        if (message.patchReview.kind !== 'replaceRangeInFile') return message;
-        const status = (message.patchReview as any).status ?? 'pending';
-        if (status !== 'pending') return message;
-        return {
-          ...message,
-          patchReview: {
-            ...message.patchReview,
+      .map((entry) => entry.id);
+    if (pendingEntries.length === 0) return;
+    setBulkActionBusy(true);
+    try {
+      for (const entry of pendingEntries) {
+        const message = messagesRef.current.find((item) => item.id === entry);
+        if (!message?.patchReview) continue;
+        try {
+          const transaction = await rejectDurableReviewTransaction(
+            message.patchReview
+          );
+          updatePatchReviewMessage(entry, (current) => ({
+            ...current,
             status: 'rejected',
-          } as any,
-        };
-      })
-    );
-    setPatchActionErrors((prev) => {
-      let changed = false;
-      for (const id of ids) {
-        if (id in prev) {
-          changed = true;
-          break;
+            transactionRevision: transaction.revision,
+            transactionError: undefined,
+          }));
+          clearPatchErrorForMessage(entry);
+        } catch (error) {
+          setPatchActionErrors((previous) => ({
+            ...previous,
+            [entry]: error instanceof Error ? error.message : String(error),
+          }));
         }
       }
-      if (!changed) return prev;
-      const next = { ...prev };
-      for (const id of ids) {
-        delete next[id];
-      }
-      return next;
-    });
-    for (const entry of pendingEntries) {
-      recordReviewAction({
-        messageId: entry.messageId,
-        action: 'reject',
-        prevStatus: entry.prevStatus,
-        nextStatus: 'rejected',
-        patchKind: entry.patchKind,
-      });
+    } finally {
+      setBulkActionBusy(false);
     }
   };
 
@@ -9858,13 +9693,9 @@ const Panel = () => {
   const onAcceptPatchReviewRef = useRef(onAcceptPatchReviewMessage);
   const onFeedbackPatchReviewRef = useRef(onFeedbackPatchReviewMessage);
   const onRejectPatchReviewRef = useRef(onRejectPatchReviewMessage);
-  const executeReviewUndoRef = useRef(executeReviewUndo);
-  const executeReviewRedoRef = useRef(executeReviewRedo);
   onAcceptPatchReviewRef.current = onAcceptPatchReviewMessage;
   onFeedbackPatchReviewRef.current = onFeedbackPatchReviewMessage;
   onRejectPatchReviewRef.current = onRejectPatchReviewMessage;
-  executeReviewUndoRef.current = executeReviewUndo;
-  executeReviewRedoRef.current = executeReviewRedo;
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -9897,76 +9728,6 @@ const Panel = () => {
         PANEL_OVERLAY_ACTION_EVENT,
         handler as EventListener
       );
-  }, []);
-
-  useEffect(() => {
-    const isEditorShortcutTarget = (target: EventTarget | null) => {
-      if (!(target instanceof HTMLElement)) return false;
-      if (target.closest('#ageaf-panel-root')) return false;
-      return Boolean(target.closest('.cm-editor, .cm-content'));
-    };
-
-    const isEditorFocused = () => {
-      const active = document.activeElement;
-      if (!(active instanceof HTMLElement)) return false;
-      if (active.closest('#ageaf-panel-root')) return false;
-      return Boolean(active.closest('.cm-editor, .cm-content'));
-    };
-
-    const isTypingTarget = (target: EventTarget | null) => {
-      if (!(target instanceof HTMLElement)) return false;
-      if (target.isContentEditable) return true;
-      const tagName = target.tagName;
-      if (tagName === 'TEXTAREA') return true;
-      if (tagName !== 'INPUT') return false;
-      const input = target as HTMLInputElement;
-      const type = (input.type || 'text').toLowerCase();
-      return type !== 'button' && type !== 'checkbox' && type !== 'radio';
-    };
-
-    const onWindowKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.altKey) return;
-      const active = document.activeElement;
-      const editorContext = isEditorShortcutTarget(event.target) || isEditorFocused();
-      const isTypingContext = isTypingTarget(event.target) || isTypingTarget(active);
-      if (isTypingContext && !editorContext) return;
-
-      const key = event.key.toLowerCase();
-      const isUndo = key === 'z' && !event.shiftKey;
-      const isRedo = (key === 'z' && event.shiftKey) || key === 'y';
-      if (!isUndo && !isRedo) return;
-
-      const topReviewEntry = isUndo
-        ? reviewUndoStackRef.current[reviewUndoStackRef.current.length - 1]
-        : reviewRedoStackRef.current[reviewRedoStackRef.current.length - 1];
-      if (!topReviewEntry) return;
-
-      if (
-        editorContext &&
-        typeof topReviewEntry.editorHistoryMarker === 'number'
-      ) {
-        const currentEditorHistoryMarker =
-          window.ageafBridge?.getEditorHistoryMarker?.() ??
-          topReviewEntry.editorHistoryMarker;
-        if (
-          currentEditorHistoryMarker !== topReviewEntry.editorHistoryMarker
-        ) {
-          return;
-        }
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      if (isUndo) {
-        void executeReviewUndoRef.current();
-      } else {
-        void executeReviewRedoRef.current();
-      }
-    };
-
-    window.addEventListener('keydown', onWindowKeyDown, true);
-    return () => window.removeEventListener('keydown', onWindowKeyDown, true);
   }, []);
 
   const emitPendingOverlay = (force = false) => {

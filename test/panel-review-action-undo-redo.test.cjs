@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-test('Panel defines review action undo/redo stacks and executors', () => {
+test('Panel does not keep an authoritative local review undo/redo stack', () => {
   const panelPath = path.join(
     __dirname,
     '..',
@@ -14,16 +14,13 @@ test('Panel defines review action undo/redo stacks and executors', () => {
   );
   const contents = fs.readFileSync(panelPath, 'utf8');
 
-  assert.match(contents, /type ReviewActionHistoryEntry\s*=/);
-  assert.match(contents, /reviewUndoStackRef/);
-  assert.match(contents, /reviewRedoStackRef/);
-  assert.match(contents, /executeReviewUndo/);
-  assert.match(contents, /executeReviewRedo/);
-  assert.match(contents, /ageafBridge\?\.undoEditor/);
-  assert.match(contents, /ageafBridge\?\.redoEditor/);
+  assert.doesNotMatch(contents, /type ReviewActionHistoryEntry\s*=/);
+  assert.doesNotMatch(contents, /reviewUndoStackRef|reviewRedoStackRef/);
+  assert.doesNotMatch(contents, /executeReviewUndo|executeReviewRedo/);
+  assert.doesNotMatch(contents, /ageafBridge\?\.undoEditor|ageafBridge\?\.redoEditor/);
 });
 
-test('Panel records history for bulk and file-level review actions', () => {
+test('Bulk and file-level review actions use durable transaction commands', () => {
   const panelPath = path.join(
     __dirname,
     '..',
@@ -34,25 +31,16 @@ test('Panel records history for bulk and file-level review actions', () => {
   );
   const contents = fs.readFileSync(panelPath, 'utf8');
 
-  assert.match(
-    contents,
-    /const onBulkAcceptAll = async \(\) => \{[\s\S]*recordReviewAction\(/m
-  );
-  assert.match(
-    contents,
-    /const onBulkRejectAll = async \(\) => \{[\s\S]*recordReviewAction\(/m
-  );
-  assert.match(
-    contents,
-    /const onAcceptFilePatches = async \(fileKey: string\) => \{[\s\S]*recordReviewAction\(/m
-  );
-  assert.match(
-    contents,
-    /const onRejectFilePatches = \(fileKey: string\) => \{[\s\S]*recordReviewAction\(/m
-  );
+  assert.match(contents, /const onBulkAcceptAll = async \(\) =>/);
+  assert.match(contents, /const onBulkRejectAll = async \(\) =>/);
+  assert.match(contents, /const onAcceptFilePatches = async \(fileKey: string\) =>/);
+  assert.match(contents, /const onRejectFilePatches = async \(fileKey: string\) =>/);
+  assert.match(contents, /acceptSinglePatch/);
+  assert.match(contents, /rejectDurableReviewTransaction/);
+  assert.doesNotMatch(contents, /recordReviewAction/);
 });
 
-test('Panel shortcut handler supports global non-typing contexts', () => {
+test('Panel does not intercept global undo/redo for review projections', () => {
   const panelPath = path.join(
     __dirname,
     '..',
@@ -63,12 +51,11 @@ test('Panel shortcut handler supports global non-typing contexts', () => {
   );
   const contents = fs.readFileSync(panelPath, 'utf8');
 
-  assert.match(contents, /const isTypingTarget = \(target: EventTarget \| null\) =>/);
-  assert.match(contents, /const isTypingContext = isTypingTarget\(event\.target\) \|\| isTypingTarget\(active\);/);
-  assert.match(contents, /if \(isTypingContext && !editorContext\) return;/);
+  assert.doesNotMatch(contents, /const topReviewEntry = isUndo/);
+  assert.doesNotMatch(contents, /executeReviewUndoRef|executeReviewRedoRef/);
 });
 
-test('Panel only intercepts review undo shortcuts when review history is next chronologically', () => {
+test('Panel does not replay accepted replacements through direct editor history', () => {
   const panelPath = path.join(
     __dirname,
     '..',
@@ -79,13 +66,9 @@ test('Panel only intercepts review undo shortcuts when review history is next ch
   );
   const contents = fs.readFileSync(panelPath, 'utf8');
 
-  assert.match(contents, /editorHistoryMarker/);
-  assert.match(contents, /currentEditorHistoryMarker/);
-  assert.match(contents, /const topReviewEntry = isUndo[\s\S]*reviewRedoStackRef\.current\[reviewRedoStackRef\.current\.length - 1\]/m);
-  assert.match(contents, /editorContext &&/);
-  assert.match(contents, /typeof topReviewEntry\.editorHistoryMarker === 'number'/);
-  assert.match(contents, /currentEditorHistoryMarker !== topReviewEntry\.editorHistoryMarker/);
-  assert.match(contents, /return;/);
+  assert.doesNotMatch(contents, /applyReplaceRange|applyReplaceInFile/);
+  assert.doesNotMatch(contents, /editorHistoryMarker|currentEditorHistoryMarker/);
+  assert.match(contents, /transaction\.receipt\?\.success !== true/);
 });
 
 test('Central editor adapter exposes bounded undoEditor/redoEditor bridge methods', () => {
