@@ -1,11 +1,32 @@
 import { getContentAfterCursor, getContentBeforeCursor, getCmView } from '../helpers';
 import { applyReplacementAtRange } from '../eventHandlers';
 import { MAX_LENGTH_AFTER_CURSOR, MAX_LENGTH_BEFORE_CURSOR } from '../../constants';
+import {
+  canonicalFilePath,
+  validateAnchoredInsertionBatch,
+  type EditorFileSnapshotV1,
+} from '../../transactions/anchoredInsertion';
+import {
+  TransactionError,
+  sanitizeFailure,
+  sanitizeFailureCode,
+  type ApplyEditBatchReceiptV1,
+  type ApplyEditBatchRequestV1,
+  type TransactionErrorCode,
+} from '../../transactions/contracts';
 
 const REQUEST_EVENT = 'ageaf:editor:request';
 const RESPONSE_EVENT = 'ageaf:editor:response';
 const APPLY_REQUEST_EVENT = 'ageaf:editor:apply:request';
 const APPLY_RESPONSE_EVENT = 'ageaf:editor:apply:response';
+const BATCH_REQUEST_EVENT = 'ageaf:editor:batch:request';
+const BATCH_RESPONSE_EVENT = 'ageaf:editor:batch:response';
+const INSERTION_TARGET_REQUEST_EVENT =
+  'ageaf:editor:insertion-target:request';
+const INSERTION_TARGET_RESPONSE_EVENT =
+  'ageaf:editor:insertion-target:response';
+const TARGET_FILE_REQUEST_EVENT = 'ageaf:editor:target-file:request';
+const TARGET_FILE_RESPONSE_EVENT = 'ageaf:editor:target-file:response';
 const FILE_REQUEST_EVENT = 'ageaf:editor:file-content:request';
 const FILE_RESPONSE_EVENT = 'ageaf:editor:file-content:response';
 const FILE_NAVIGATE_REQUEST_EVENT = 'ageaf:editor:file-navigate:request';
@@ -40,6 +61,21 @@ interface SelectionResponse {
   lineTo: number;
 }
 
+interface InsertionTargetRequestV1 {
+  requestId: string;
+}
+
+interface InsertionTargetResponseV1 {
+  requestId: string;
+  projectId: string | null;
+  filePath: string;
+  fileId?: string;
+  content: string;
+  offset: number;
+  ok: boolean;
+  error?: string;
+}
+
 interface ApplyReplaceRangeRequest {
   requestId: string;
   kind: 'replaceRange';
@@ -59,16 +95,9 @@ interface ApplyReplaceInFileRequest {
   to?: number;
 }
 
-interface ApplyInsertAtCursorRequest {
-  requestId: string;
-  kind: 'insertAtCursor';
-  text: string;
-}
-
 type ApplyRequest =
   | ApplyReplaceRangeRequest
-  | ApplyReplaceInFileRequest
-  | ApplyInsertAtCursorRequest;
+  | ApplyReplaceInFileRequest;
 
 interface ApplyResponse {
   requestId: string;
@@ -91,6 +120,24 @@ interface FileContentResponse {
   name: string;
   content: string;
   activeName: string | null;
+  fileId?: string;
+  ok: boolean;
+  error?: string;
+}
+
+interface TargetFileRequestV1 {
+  requestId: string;
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+}
+
+interface TargetFileResponseV1 {
+  requestId: string;
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+  content: string;
   ok: boolean;
   error?: string;
 }
@@ -145,9 +192,11 @@ function onHelloRequest(event: Event) {
   const compatible = detail.protocolVersion === EDITOR_BRIDGE_PROTOCOL_VERSION;
   const capabilities = {
     selection: editorReady,
+    insertionTarget: editorReady,
     fileContent: editorReady,
+    targetFile: editorReady,
     navigation: editorReady,
-    insertAtCursor: editorReady,
+    applyEditBatch: editorReady,
     replaceRange: editorReady,
     replaceInFile: editorReady,
     history: editorReady,
@@ -282,7 +331,10 @@ function extractFilenameFromLabel(raw: string): string | null {
   return matches[matches.length - 1] ?? null;
 }
 
-function getActiveTabName(): string | null {
+function getActiveFileDescriptor(): {
+  filePath: string;
+  fileId?: string;
+} | null {
   const selectors = [
     '.cm-tab.is-active, .cm-tab[aria-selected="true"]',
     '.cm-tab--active',
@@ -299,9 +351,24 @@ function getActiveTabName(): string | null {
       ''
     ).trim();
     const extracted = extractFilenameFromLabel(label);
-    if (extracted) return extracted;
+    if (!extracted) continue;
+    const identityNode =
+      selected.closest<HTMLElement>('[data-file-id], [data-entity-id]') ??
+      selected;
+    const fileId =
+      identityNode.getAttribute('data-file-id') ??
+      identityNode.getAttribute('data-entity-id') ??
+      undefined;
+    return {
+      filePath: canonicalFilePath(extracted),
+      ...(fileId ? { fileId } : {}),
+    };
   }
   return null;
+}
+
+function getActiveTabName(): string | null {
+  return getActiveFileDescriptor()?.filePath ?? null;
 }
 
 function normalizeFileName(filePath: string): string {
@@ -347,6 +414,133 @@ function findClickableByName(name: string): HTMLElement | null {
     }
   }
   return null;
+}
+
+type ExactFileCandidate = {
+  element: HTMLElement;
+  fileId?: string;
+};
+
+function fileIdForNode(node: HTMLElement): string | undefined {
+  const identityNode =
+    node.closest<HTMLElement>('[data-file-id], [data-entity-id]') ?? node;
+  return (
+    identityNode.getAttribute('data-file-id') ??
+    identityNode.getAttribute('data-entity-id') ??
+    undefined
+  );
+}
+
+function findExactFileCandidates(name: string): ExactFileCandidate[] {
+  const target = canonicalFilePath(name).toLowerCase();
+  const nodes = Array.from(
+    document.querySelectorAll(
+      [
+        '[role="tab"]',
+        '[role="treeitem"]',
+        '[data-testid="file-name"]',
+        '.file-tree-item-name',
+        '.file-name',
+        '.entity-name',
+        '.file-label',
+        '.cm-tab',
+        '.cm-tab-label',
+      ].join(', ')
+    )
+  );
+  const unique = new Map<HTMLElement, ExactFileCandidate>();
+  for (const node of nodes) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (node.closest('#ageaf-panel-root')) continue;
+    const label = (
+      node.getAttribute('aria-label') ??
+      node.getAttribute('title') ??
+      node.textContent ??
+      ''
+    ).trim();
+    const filePath = extractFilenameFromLabel(label);
+    if (!filePath || canonicalFilePath(filePath).toLowerCase() !== target) {
+      continue;
+    }
+    const clickable =
+      node.closest<HTMLElement>('[role="tab"], [role="treeitem"], .cm-tab') ??
+      node;
+    unique.set(clickable, {
+      element: clickable,
+      ...(fileIdForNode(clickable) ? { fileId: fileIdForNode(clickable) } : {}),
+    });
+  }
+  return Array.from(unique.values());
+}
+
+function matchesExactFile(
+  active: { filePath: string; fileId?: string } | null,
+  filePath: string,
+  fileId?: string
+): boolean {
+  if (!active) return false;
+  if (
+    canonicalFilePath(active.filePath).toLowerCase() !==
+    canonicalFilePath(filePath).toLowerCase()
+  ) {
+    return false;
+  }
+  return !fileId || active.fileId === fileId;
+}
+
+function chooseExactFileCandidate(
+  candidates: ExactFileCandidate[],
+  fileId?: string
+): ExactFileCandidate {
+  if (fileId) {
+    const matching = candidates.filter((candidate) => candidate.fileId === fileId);
+    if (matching.length === 0) {
+      throw new TransactionError('WRONG_FILE', 'Target file identity unavailable');
+    }
+    return matching[0];
+  }
+  if (candidates.length === 1) return candidates[0];
+  const identities = new Set(
+    candidates.map((candidate) => candidate.fileId).filter(Boolean)
+  );
+  if (identities.size === 1 && candidates.every((candidate) => candidate.fileId)) {
+    return candidates[0];
+  }
+  throw new TransactionError(
+    'WRONG_FILE',
+    candidates.length === 0
+      ? 'Target file unavailable'
+      : 'Target file identity is ambiguous'
+  );
+}
+
+async function activateExactFile(filePath: string, fileId?: string): Promise<void> {
+  if (matchesExactFile(getActiveFileDescriptor(), filePath, fileId)) {
+    return;
+  }
+  const candidates = findExactFileCandidates(filePath);
+  const candidate = chooseExactFileCandidate(candidates, fileId);
+  candidate.element.click();
+  const deadline = Date.now() + 2500;
+  while (Date.now() < deadline) {
+    if (matchesExactFile(getActiveFileDescriptor(), filePath, fileId)) {
+      return;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(50);
+  }
+  throw new TransactionError('WRONG_FILE', 'Target file did not activate');
+}
+
+async function restoreExactFile(
+  target: { filePath: string; fileId?: string } | null
+): Promise<void> {
+  if (!target) return;
+  try {
+    await activateExactFile(target.filePath, target.fileId);
+  } catch {
+    // Restoration is best-effort after the acknowledged target mutation.
+  }
 }
 
 function restoreActiveFile(desiredName: string | null, activeName: string | null) {
@@ -427,7 +621,8 @@ async function onFileContentRequest(event: Event) {
     error = err instanceof Error ? err.message : String(err);
   }
 
-  const activeName = getActiveTabName();
+  const activeFile = getActiveFileDescriptor();
+  const activeName = activeFile?.filePath ?? null;
   const content = view.state.sliceDoc(0, view.state.doc.length);
 
   // If we didn't end up on the requested file, do not claim success.
@@ -443,6 +638,7 @@ async function onFileContentRequest(event: Event) {
     name: requested,
     content,
     activeName,
+    ...(activeFile?.fileId ? { fileId: activeFile.fileId } : {}),
     ok,
     ...(error ? { error } : {}),
   };
@@ -474,6 +670,211 @@ function onSelectionRequest(event: Event) {
   };
 
   window.dispatchEvent(new CustomEvent(RESPONSE_EVENT, { detail: response }));
+}
+
+function onInsertionTargetRequest(event: Event) {
+  const detail = (event as CustomEvent<InsertionTargetRequestV1>).detail;
+  if (!detail?.requestId) return;
+
+  let response: InsertionTargetResponseV1;
+  try {
+    const view = getTrackedCmView();
+    const activeFile = getActiveFileDescriptor();
+    const projectId = currentProjectId();
+    const offset = view.state.selection.main.head;
+    if (!projectId || !activeFile || !Number.isInteger(offset) || offset < 0) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Insertion target identity unavailable'
+      );
+    }
+    response = {
+      requestId: detail.requestId,
+      projectId,
+      filePath: activeFile.filePath,
+      ...(activeFile.fileId ? { fileId: activeFile.fileId } : {}),
+      content: view.state.sliceDoc(0, view.state.doc.length),
+      offset,
+      ok: true,
+    };
+  } catch (error) {
+    response = {
+      requestId: detail.requestId,
+      projectId: currentProjectId(),
+      filePath: '',
+      content: '',
+      offset: -1,
+      ok: false,
+      error:
+        error instanceof TransactionError
+          ? error.code
+          : 'EDITOR_UNAVAILABLE',
+    };
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(INSERTION_TARGET_RESPONSE_EVENT, { detail: response })
+  );
+}
+
+async function onTargetFileRequest(event: Event) {
+  const detail = (event as CustomEvent<TargetFileRequestV1>).detail;
+  if (!detail?.requestId || !detail?.projectId || !detail?.filePath) return;
+
+  const originalFile = getActiveFileDescriptor();
+  let response: TargetFileResponseV1;
+  try {
+    if (currentProjectId() !== detail.projectId) {
+      throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
+    }
+    await activateExactFile(detail.filePath, detail.fileId);
+    const activeFile = getActiveFileDescriptor();
+    if (!matchesExactFile(activeFile, detail.filePath, detail.fileId)) {
+      throw new TransactionError('WRONG_FILE', 'Target file mismatch');
+    }
+    const view = getTrackedCmView();
+    response = {
+      requestId: detail.requestId,
+      projectId: detail.projectId,
+      filePath: activeFile!.filePath,
+      ...(activeFile?.fileId ? { fileId: activeFile.fileId } : {}),
+      content: view.state.sliceDoc(0, view.state.doc.length),
+      ok: true,
+    };
+  } catch (error) {
+    const code =
+      error instanceof TransactionError
+        ? error.code
+        : sanitizeFailureCode(
+            error && typeof error === 'object' && 'code' in error
+              ? (error as { code?: unknown }).code
+              : undefined
+          );
+    response = {
+      requestId: detail.requestId,
+      projectId: detail.projectId,
+      filePath: canonicalFilePath(detail.filePath),
+      ...(detail.fileId ? { fileId: detail.fileId } : {}),
+      content: '',
+      ok: false,
+      error: code,
+    };
+  } finally {
+    await restoreExactFile(originalFile);
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(TARGET_FILE_RESPONSE_EVENT, { detail: response })
+  );
+}
+
+const batchExecutions = new Map<
+  string,
+  Promise<ApplyEditBatchReceiptV1>
+>();
+
+function batchFailureReceipt(
+  request: ApplyEditBatchRequestV1,
+  code: TransactionErrorCode
+): ApplyEditBatchReceiptV1 {
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    requestId: request.requestId,
+    batchId: request.batchId,
+    success: false,
+    error: sanitizeFailure(code, Date.now()),
+  };
+}
+
+async function executeAnchoredInsertionBatch(
+  request: ApplyEditBatchRequestV1
+): Promise<ApplyEditBatchReceiptV1> {
+  const originalFile = getActiveFileDescriptor();
+  let dispatched = false;
+  try {
+    if (currentProjectId() !== request.projectId) {
+      throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
+    }
+    await activateExactFile(request.filePath, request.fileId);
+    const activeFile = getActiveFileDescriptor();
+    if (!activeFile) {
+      throw new TransactionError('WRONG_FILE', 'Target file unavailable');
+    }
+
+    const view = getTrackedCmView();
+    const content = view.state.sliceDoc(0, view.state.doc.length);
+    const snapshot: EditorFileSnapshotV1 = {
+      projectId: request.projectId,
+      filePath: activeFile.filePath,
+      ...(activeFile.fileId ? { fileId: activeFile.fileId } : {}),
+      content,
+    };
+    const validation = await validateAnchoredInsertionBatch(request, snapshot);
+    const change = request.changes[0]!;
+
+    reviewChangeInProgress = true;
+    try {
+      view.dispatch({
+        changes: {
+          from: change.from,
+          to: change.to,
+          insert: change.replacementText,
+        },
+      });
+      dispatched = true;
+    } finally {
+      reviewChangeInProgress = false;
+    }
+
+    const actualAfter = view.state.sliceDoc(0, view.state.doc.length);
+    if (actualAfter !== validation.afterContent) {
+      throw new TransactionError(
+        'RECOVERY_REQUIRED',
+        'Editor content diverged after dispatch'
+      );
+    }
+
+    return {
+      schemaVersion: 1,
+      protocolVersion: 1,
+      requestId: request.requestId,
+      batchId: request.batchId,
+      success: true,
+      beforeSha256: validation.beforeSha256,
+      afterSha256: validation.afterSha256,
+      appliedChanges: [validation.appliedChange],
+    };
+  } catch (error) {
+    const code = dispatched
+      ? 'APPLY_TIMEOUT'
+      : error instanceof TransactionError
+        ? error.code
+        : sanitizeFailureCode(
+            error && typeof error === 'object' && 'code' in error
+              ? (error as { code?: unknown }).code
+              : undefined
+          );
+    return batchFailureReceipt(request, code);
+  } finally {
+    await restoreExactFile(originalFile);
+  }
+}
+
+function onBatchRequest(event: Event) {
+  const request = (event as CustomEvent<ApplyEditBatchRequestV1>).detail;
+  if (!request?.requestId || !request?.batchId) return;
+  const cacheKey = `${request.requestId}\u001e${request.batchId}`;
+  let execution = batchExecutions.get(cacheKey);
+  if (!execution) {
+    execution = executeAnchoredInsertionBatch(request);
+    batchExecutions.set(cacheKey, execution);
+  }
+  void execution.then((receipt) => {
+    window.dispatchEvent(
+      new CustomEvent(BATCH_RESPONSE_EVENT, { detail: receipt })
+    );
+  });
 }
 
 async function onApplyRequest(event: Event) {
@@ -525,23 +926,7 @@ async function onApplyRequest(event: Event) {
       return { from: best, to: best + needle.length };
     };
 
-    if (detail.kind === 'insertAtCursor') {
-      if (typeof detail.text !== 'string' || !detail.text) {
-        ok = false;
-        error = 'Invalid insertAtCursor patch';
-      } else {
-        const { head } = view.state.selection.main;
-        reviewChangeInProgress = true;
-        try {
-          view.dispatch({
-            changes: { from: head, to: head, insert: detail.text },
-            selection: { anchor: head + detail.text.length },
-          });
-        } finally {
-          reviewChangeInProgress = false;
-        }
-      }
-    } else if (detail.kind === 'replaceRange') {
+    if (detail.kind === 'replaceRange') {
       const hasValidRange =
         typeof detail.from === 'number' &&
         Number.isFinite(detail.from) &&
@@ -884,8 +1269,17 @@ export function registerEditorBridge() {
     // Editor boot can race bridge registration; lazy init on first request.
   }
   window.addEventListener(REQUEST_EVENT, onSelectionRequest as EventListener);
+  window.addEventListener(
+    INSERTION_TARGET_REQUEST_EVENT,
+    onInsertionTargetRequest as EventListener
+  );
   window.addEventListener(FILE_REQUEST_EVENT, onFileContentRequest as EventListener);
+  window.addEventListener(
+    TARGET_FILE_REQUEST_EVENT,
+    onTargetFileRequest as EventListener
+  );
   window.addEventListener(APPLY_REQUEST_EVENT, onApplyRequest as EventListener);
+  window.addEventListener(BATCH_REQUEST_EVENT, onBatchRequest as EventListener);
   window.addEventListener(FILE_NAVIGATE_REQUEST_EVENT, onFileNavigateRequest as EventListener);
   window.addEventListener(HISTORY_REQUEST_EVENT, onHistoryRequest as EventListener);
   window.addEventListener(HELLO_REQUEST_EVENT, onHelloRequest as EventListener);

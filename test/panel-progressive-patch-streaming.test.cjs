@@ -37,7 +37,7 @@ test('Panel renders and persists patch review cards during active streaming', ()
   );
   assert.match(
     contents,
-    /const updatedStored = upsertPatchReviewMessage\(\s*baseConversation\.messages,\s*patchMessage\s*\);[\s\S]*setConversationMessages\(\s*baseState,\s*baseConversation\.provider,\s*sessionConversationId,\s*updatedStored\s*\)/s
+    /const updatedStored = upsertPatchReviewMessage\(\s*latestConversation\.messages,\s*patchMessage\s*\);[\s\S]*setConversationMessages\(\s*latestState,\s*latestConversation\.provider,\s*sessionConversationId,\s*updatedStored\s*\)/s
   );
 });
 
@@ -57,8 +57,7 @@ test('Panel re-reads latest conversation state before mid-stream patch persisten
     contents,
     /const latestConversation = latestState\s*\?\s*findConversation\(latestState,\s*sessionConversationId\)\s*:\s*null/
   );
-  assert.match(contents, /const baseState = latestState \?\? state/);
-  assert.match(contents, /const baseConversation = latestConversation \?\? conversation/);
+  assert.match(contents, /if \(!latestState \|\| !latestConversation\) return;/);
 });
 
 test('Panel finalization inserts assistant before trailing patches and deduplicates pending queue', () => {
@@ -123,7 +122,7 @@ test('Panel upserts duplicate patch review cards during streaming instead of app
   );
   assert.match(
     contents,
-    /const updatedStored = upsertPatchReviewMessage\(\s*baseConversation\.messages,\s*patchMessage\s*\);/
+    /const updatedStored = upsertPatchReviewMessage\(\s*latestConversation\.messages,\s*patchMessage\s*\);/
   );
   assert.match(
     contents,

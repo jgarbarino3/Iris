@@ -1,3 +1,8 @@
+import type {
+  ApplyEditBatchReceiptV1,
+  ApplyEditBatchRequestV1,
+} from '../transactions/contracts';
+
 export const EDITOR_BRIDGE_PROTOCOL_VERSION = 1;
 
 const EVENTS = {
@@ -8,6 +13,12 @@ const EVENTS = {
   selectionResponse: 'ageaf:editor:response',
   applyRequest: 'ageaf:editor:apply:request',
   applyResponse: 'ageaf:editor:apply:response',
+  batchRequest: 'ageaf:editor:batch:request',
+  batchResponse: 'ageaf:editor:batch:response',
+  insertionTargetRequest: 'ageaf:editor:insertion-target:request',
+  insertionTargetResponse: 'ageaf:editor:insertion-target:response',
+  targetFileRequest: 'ageaf:editor:target-file:request',
+  targetFileResponse: 'ageaf:editor:target-file:response',
   fileRequest: 'ageaf:editor:file-content:request',
   fileResponse: 'ageaf:editor:file-content:response',
   navigateRequest: 'ageaf:editor:file-navigate:request',
@@ -19,9 +30,11 @@ const EVENTS = {
 
 export type EditorCapability =
   | 'selection'
+  | 'insertionTarget'
   | 'fileContent'
+  | 'targetFile'
   | 'navigation'
-  | 'insertAtCursor'
+  | 'applyEditBatch'
   | 'replaceRange'
   | 'replaceInFile'
   | 'history';
@@ -64,6 +77,43 @@ export type ApplyReplaceInFileArgs = {
 type BridgeResult = { ok: boolean; error?: string };
 type PendingHandler<T> = (payload: T) => void;
 
+export type FileContentResult = {
+  requestId: string;
+  name: string;
+  content: string;
+  activeName: string | null;
+  fileId?: string;
+  ok: boolean;
+  error?: string;
+};
+
+export type TargetFileRequestV1 = {
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+};
+
+export type InsertionTargetResultV1 = {
+  requestId: string;
+  projectId: string | null;
+  filePath: string;
+  fileId?: string;
+  content: string;
+  offset: number;
+  ok: boolean;
+  error?: string;
+};
+
+export type TargetFileResultV1 = {
+  requestId: string;
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+  content: string;
+  ok: boolean;
+  error?: string;
+};
+
 type HelloResponseV1 = {
   requestId: string;
   nonce: string;
@@ -79,8 +129,14 @@ type HelloResponseV1 = {
 
 export type EditorAdapter = {
   requestSelection: () => Promise<any>;
-  requestFileContent: (name: string) => Promise<any>;
-  insertAtCursor: (text: string) => Promise<BridgeResult>;
+  captureInsertionTarget: () => Promise<InsertionTargetResultV1>;
+  requestFileContent: (name: string) => Promise<FileContentResult>;
+  requestTargetFile: (
+    target: TargetFileRequestV1
+  ) => Promise<TargetFileResultV1>;
+  applyEditBatch: (
+    request: ApplyEditBatchRequestV1
+  ) => Promise<ApplyEditBatchReceiptV1>;
   applyReplaceRange: (payload: ApplyReplaceRangeArgs) => Promise<BridgeResult>;
   applyReplaceInFile: (
     payload: ApplyReplaceInFileArgs
@@ -102,9 +158,11 @@ declare global {
 
 const EMPTY_CAPABILITIES: Record<EditorCapability, boolean> = {
   selection: false,
+  insertionTarget: false,
   fileContent: false,
+  targetFile: false,
   navigation: false,
-  insertAtCursor: false,
+  applyEditBatch: false,
   replaceRange: false,
   replaceInFile: false,
   history: false,
@@ -140,8 +198,20 @@ function currentProjectId() {
 
 export function createEditorAdapter(): EditorAdapter {
   const selectionRequests = new Map<string, PendingHandler<any>>();
+  const insertionTargetRequests = new Map<
+    string,
+    PendingHandler<InsertionTargetResultV1>
+  >();
   const fileRequests = new Map<string, PendingHandler<any>>();
+  const targetFileRequests = new Map<
+    string,
+    PendingHandler<TargetFileResultV1>
+  >();
   const applyRequests = new Map<string, PendingHandler<BridgeResult>>();
+  const batchRequests = new Map<
+    string,
+    PendingHandler<ApplyEditBatchReceiptV1>
+  >();
   const navigateRequests = new Map<string, PendingHandler<{ ok: boolean }>>();
   const historyRequests = new Map<string, PendingHandler<BridgeResult>>();
   const helloRequests = new Map<string, PendingHandler<HelloResponseV1>>();
@@ -165,14 +235,35 @@ export function createEditorAdapter(): EditorAdapter {
   window.addEventListener(EVENTS.selectionResponse, (event) =>
     onResponse(selectionRequests, event, (detail) => detail)
   );
+  window.addEventListener(EVENTS.insertionTargetResponse, (event) =>
+    onResponse(
+      insertionTargetRequests,
+      event,
+      (detail) => detail as InsertionTargetResultV1
+    )
+  );
   window.addEventListener(EVENTS.fileResponse, (event) =>
     onResponse(fileRequests, event, (detail) => detail)
+  );
+  window.addEventListener(EVENTS.targetFileResponse, (event) =>
+    onResponse(
+      targetFileRequests,
+      event,
+      (detail) => detail as TargetFileResultV1
+    )
   );
   window.addEventListener(EVENTS.applyResponse, (event) =>
     onResponse(applyRequests, event, (detail) => ({
       ok: Boolean(detail.ok),
       ...(detail.error ? { error: String(detail.error) } : {}),
     }))
+  );
+  window.addEventListener(EVENTS.batchResponse, (event) =>
+    onResponse(
+      batchRequests,
+      event,
+      (detail) => detail as ApplyEditBatchReceiptV1
+    )
   );
   window.addEventListener(EVENTS.navigateResponse, (event) =>
     onResponse(navigateRequests, event, (detail) => ({
@@ -335,6 +426,18 @@ export function createEditorAdapter(): EditorAdapter {
       );
     },
 
+    async captureInsertionTarget() {
+      await requireCapability('insertionTarget');
+      const id = requestId();
+      return request(
+        insertionTargetRequests,
+        EVENTS.insertionTargetRequest,
+        { requestId: id },
+        READ_TIMEOUT_MS,
+        'Timed out capturing the insertion target'
+      );
+    },
+
     async requestFileContent(name: string) {
       await requireCapability('fileContent');
       const id = requestId();
@@ -347,23 +450,27 @@ export function createEditorAdapter(): EditorAdapter {
       );
     },
 
-    async insertAtCursor(text: string) {
-      try {
-        await requireCapability('insertAtCursor');
-        const id = requestId();
-        return await request(
-          applyRequests,
-          EVENTS.applyRequest,
-          { requestId: id, kind: 'insertAtCursor', text },
-          APPLY_TIMEOUT_MS,
-          'Timed out waiting for editor insert response'
-        );
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+    async requestTargetFile(target: TargetFileRequestV1) {
+      await requireCapability('targetFile');
+      const id = requestId();
+      return request(
+        targetFileRequests,
+        EVENTS.targetFileRequest,
+        { requestId: id, ...target },
+        APPLY_TIMEOUT_MS,
+        'Timed out reading the recorded target file'
+      );
+    },
+
+    async applyEditBatch(payload: ApplyEditBatchRequestV1) {
+      await requireCapability('applyEditBatch');
+      return request(
+        batchRequests,
+        EVENTS.batchRequest,
+        payload as unknown as Record<string, unknown>,
+        APPLY_TIMEOUT_MS,
+        'APPLY_TIMEOUT'
+      );
     },
 
     async applyReplaceRange(payload: ApplyReplaceRangeArgs) {
@@ -465,7 +572,7 @@ export function createEditorAdapter(): EditorAdapter {
       const current = getHealth();
       return (
         current.status === 'ready' &&
-        (current.capabilities.insertAtCursor ||
+        (current.capabilities.applyEditBatch ||
           current.capabilities.replaceRange ||
           current.capabilities.replaceInFile)
       );

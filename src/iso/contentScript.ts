@@ -3,6 +3,21 @@
 import './webpackPublicPath';
 import { createEditorAdapter } from './editorAdapter';
 import { mountPanel, unmountPanel } from './panel/Panel';
+import {
+  sha256Text,
+  transactionToBatchRequest,
+  validateAnchoredInsertionBatch,
+} from '../transactions/anchoredInsertion';
+import type {
+  ApplyEditBatchRequestV1,
+  EditTransactionV1,
+  TransactionErrorCode,
+} from '../transactions/contracts';
+import {
+  TransactionError,
+  sanitizeFailure,
+  sanitizeFailureCode,
+} from '../transactions/contracts';
 const LAYOUT_ID = 'ageaf-layout';
 const LAYOUT_MAIN_CLASS = 'ageaf-layout__main';
 const PANEL_INSERT_SELECTION_EVENT = 'ageaf:panel:insert-selection';
@@ -171,10 +186,90 @@ window.addEventListener(
 );
 
 try {
-  chrome.runtime.onMessage.addListener((request) => {
+  chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request?.type === 'ageaf:open-settings') {
       window.dispatchEvent(new CustomEvent('ageaf:settings:open'));
+      return undefined;
     }
+    if (request?.type === 'iris:transaction:preflight-insertion') {
+      const transaction = request.transaction as EditTransactionV1;
+      void (async () => {
+        const file = await editorAdapter.requestTargetFile({
+          projectId: transaction.projectId,
+          filePath: transaction.target.filePath,
+          ...(transaction.target.fileId
+            ? { fileId: transaction.target.fileId }
+            : {}),
+        });
+        if (!file?.ok || typeof file.content !== 'string') {
+          throw new TransactionError(
+            sanitizeFailureCode(file?.error),
+            file?.error ?? 'EDITOR_UNAVAILABLE'
+          );
+        }
+        const validation = await validateAnchoredInsertionBatch(
+          transactionToBatchRequest(transaction, 'preflight', 'preflight'),
+          {
+            projectId: transaction.projectId,
+            filePath: file.filePath,
+            ...(file.fileId ? { fileId: file.fileId } : {}),
+            content: file.content,
+          }
+        );
+        return {
+          ok: true,
+          expectedPostApplySha256: validation.afterSha256,
+        };
+      })().then(sendResponse, (error) =>
+        sendResponse({
+          ok: false,
+          error: {
+            code:
+              error instanceof TransactionError
+                ? error.code
+                : sanitizeFailureCode(undefined),
+          },
+        })
+      );
+      return true;
+    }
+    if (request?.type === 'iris:transaction:apply-batch') {
+      const batch = request.request as ApplyEditBatchRequestV1;
+      void editorAdapter.applyEditBatch(batch).then(sendResponse, (error) => {
+        const code: TransactionErrorCode =
+          error instanceof Error && error.message === 'APPLY_TIMEOUT'
+            ? 'APPLY_TIMEOUT'
+            : 'APPLY_FAILED';
+        sendResponse({
+          schemaVersion: 1,
+          protocolVersion: 1,
+          requestId: batch.requestId,
+          batchId: batch.batchId,
+          success: false,
+          error: sanitizeFailure(code, Date.now()),
+        });
+      });
+      return true;
+    }
+    if (request?.type === 'iris:transaction:read-sha256') {
+      const transaction = request.transaction as EditTransactionV1;
+      void editorAdapter
+        .requestTargetFile({
+          projectId: transaction.projectId,
+          filePath: transaction.target.filePath,
+          ...(transaction.target.fileId
+            ? { fileId: transaction.target.fileId }
+            : {}),
+        })
+        .then(async (file) => ({
+          ...(file?.ok && typeof file.content === 'string'
+            ? { sha256: await sha256Text(file.content) }
+            : {}),
+        }))
+        .then(sendResponse);
+      return true;
+    }
+    return undefined;
   });
 } catch (error) {
   // Extension context invalidated - ignore silently

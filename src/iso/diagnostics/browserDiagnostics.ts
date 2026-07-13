@@ -88,7 +88,7 @@ export async function runBrowserDiagnostics(
   const bridgeReady = bridgeHealth?.status === 'ready';
   const mutationReady = Boolean(
     bridgeReady &&
-      (bridgeHealth.capabilities.insertAtCursor ||
+      (bridgeHealth.capabilities.applyEditBatch ||
         bridgeHealth.capabilities.replaceRange ||
         bridgeHealth.capabilities.replaceInFile)
   );

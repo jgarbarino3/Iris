@@ -22,6 +22,10 @@ test('Patch review cards are queued during streaming and inserted after the assi
   const patchEnd = contents.indexOf("if (event.event === 'done')", patchStart);
   assert.ok(patchEnd >= 0, 'expected done handler after patch handler');
   const patchHandler = contents.slice(patchStart, patchEnd);
-  assert.match(patchHandler, /pendingPatchReviewMessages/);
+  assert.match(patchHandler, /commitPatchReviewMessage/);
+  assert.match(
+    contents,
+    /const commitPatchReviewMessage[\s\S]*pendingPatchReviewMessages/
+  );
 });
 

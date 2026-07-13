@@ -4,7 +4,14 @@ const path = require('node:path');
 const test = require('node:test');
 
 test('insertAtCursor patches never degrade to a copy-only assistant block', () => {
-  const panelPath = path.join(__dirname, '..', 'src', 'iso', 'panel', 'Panel.tsx');
+  const panelPath = path.join(
+    __dirname,
+    '..',
+    'src',
+    'iso',
+    'panel',
+    'Panel.tsx'
+  );
   const contents = fs.readFileSync(panelPath, 'utf8');
 
   const patchStart = contents.indexOf("if (event.event === 'patch')");
@@ -17,13 +24,15 @@ test('insertAtCursor patches never degrade to a copy-only assistant block', () =
   // assistant block would reintroduce manual copy/paste and lose target state.
   assert.match(patchHandler, /patch\.kind === 'insertAtCursor'/);
   const insertStart = patchHandler.indexOf("patch.kind === 'insertAtCursor'");
-  const insertEnd = patchHandler.indexOf('if (!storedPatchReviewMessage)', insertStart);
+  const insertEnd = patchHandler.indexOf('return;', insertStart);
   assert.ok(insertEnd > insertStart, 'expected bounded insert review branch');
   const insertBranch = patchHandler.slice(insertStart, insertEnd);
 
-  assert.match(insertBranch, /patchReview:/);
-  assert.match(insertBranch, /kind:\s*'insertAtCursor'/);
-  assert.match(insertBranch, /status:\s*'pending'/);
+  assert.match(insertBranch, /captureInsertionPatchMessage\(patch\.text\)/);
+  assert.match(contents, /buildAnchoredInsertionProposal/);
+  assert.match(contents, /kind:\s*'insertAtCursor'/);
+  assert.match(contents, /transactionId:\s*transaction\.id/);
+  assert.match(contents, /status:\s*'pending'/);
   assert.doesNotMatch(insertBranch, /getSafeMarkdownFence/);
   assert.doesNotMatch(insertBranch, /role:\s*'assistant'/);
 });

@@ -9,6 +9,11 @@ import type {
   TransactionRuntimeRequestV1,
   TransactionRuntimeResponseV1,
 } from './transactions/contracts';
+import {
+  TransactionError,
+  isSha256,
+  sanitizeFailureCode,
+} from './transactions/contracts';
 import { IndexedDbTransactionRepository } from './transactions/indexedDbRepository';
 import { createTransactionRuntimeHandler } from './transactions/runtime';
 import { TransactionService } from './transactions/transactionService';
@@ -21,19 +26,17 @@ const streamPorts = new Map<string, chrome.runtime.Port>();
 const transactionRepository = new IndexedDbTransactionRepository();
 const transactionService = new TransactionService({ repository: transactionRepository });
 
-async function sendToActiveOverleafTab<T>(message: unknown): Promise<T> {
-  const tabs = await chrome.tabs.query({
-    active: true,
-    currentWindow: true,
-    url: 'https://www.overleaf.com/project/*',
-  });
-  const tabId = tabs[0]?.id;
-  if (!tabId) throw new Error('EDITOR_UNAVAILABLE');
+async function sendToTab<T>(tabId: number | null, message: unknown): Promise<T> {
+  if (!Number.isInteger(tabId)) {
+    throw new TransactionError('EDITOR_UNAVAILABLE', 'Editor tab unavailable');
+  }
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response: T) => {
+    chrome.tabs.sendMessage(tabId as number, message, (response: T) => {
       const error = chrome.runtime.lastError;
       if (error) {
-        reject(new Error(error.message));
+        reject(
+          new TransactionError('EDITOR_UNAVAILABLE', 'Editor tab unavailable')
+        );
         return;
       }
       resolve(response);
@@ -70,18 +73,52 @@ function rejectedRuntimeResponse(
 
 const handleTransactionRequest = createTransactionRuntimeHandler({
   service: transactionService,
-  dispatchApply: (request: ApplyEditBatchRequestV1) =>
-    sendToActiveOverleafTab<ApplyEditBatchReceiptV1>({
+  preflightTransaction: async (transaction, context) => {
+    const response = await sendToTab<{
+      ok?: boolean;
+      expectedPostApplySha256?: string;
+      error?: { code?: unknown };
+    }>(context.tabId, {
+      type: 'iris:transaction:preflight-insertion',
+      transaction,
+    });
+    if (
+      response?.ok !== true ||
+      typeof response.expectedPostApplySha256 !== 'string' ||
+      !isSha256(response.expectedPostApplySha256)
+    ) {
+      throw new TransactionError(
+        sanitizeFailureCode(response?.error?.code),
+        'Insertion preflight failed'
+      );
+    }
+    return {
+      expectedPostApplySha256: response.expectedPostApplySha256.toLowerCase(),
+    };
+  },
+  dispatchApply: (request: ApplyEditBatchRequestV1, context) =>
+    sendToTab<ApplyEditBatchReceiptV1>(context.tabId, {
       type: 'iris:transaction:apply-batch',
       request,
     }),
-  readFileSha256: async (transaction: EditTransactionV1) => {
-    const response = await sendToActiveOverleafTab<{ sha256?: string }>({
+  readFileSha256: async (transaction: EditTransactionV1, context) => {
+    if (transaction.state === 'applying' && transaction.pendingApply) {
+      const replay = await sendToTab<ApplyEditBatchReceiptV1>(context.tabId, {
+        type: 'iris:transaction:apply-batch',
+        request: transaction.pendingApply.request,
+      });
+      if (replay?.success && replay.afterSha256 && isSha256(replay.afterSha256)) {
+        return replay.afterSha256;
+      }
+    }
+    const response = await sendToTab<{ sha256?: string }>(context.tabId, {
       type: 'iris:transaction:read-sha256',
       transaction,
     });
-    if (!response?.sha256) throw new Error('EDITOR_UNAVAILABLE');
-    return response.sha256;
+    if (!response?.sha256 || !isSha256(response.sha256)) {
+      throw new TransactionError('EDITOR_UNAVAILABLE', 'Editor hash unavailable');
+    }
+    return response.sha256.toLowerCase();
   },
 });
 
@@ -155,6 +192,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const context: TransactionRuntimeContext = {
       boundProjectId: null,
       source: 'test-harness',
+      tabId: sender.tab?.id ?? null,
     };
     void handleTransactionRequest(
       message.request as TransactionRuntimeRequestV1,
@@ -179,6 +217,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const context: TransactionRuntimeContext = {
       boundProjectId,
       source: 'content-script',
+      tabId: sender.tab?.id ?? null,
     };
     void handleTransactionRequest(
       message.request as TransactionRuntimeRequestV1,

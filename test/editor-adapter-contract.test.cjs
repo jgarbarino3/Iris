@@ -24,24 +24,32 @@ test('editor adapter uses a versioned bounded fail-closed handshake', () => {
   assert.match(adapter, /response\.nonce !== nonce/);
   assert.match(adapter, /response\.eventCursor < previous\.eventCursor/);
   assert.match(adapter, /response\.projectId !== currentProjectId\(\)/);
-  assert.match(adapter, /await requireCapability\('insertAtCursor'\)/);
-  assert.match(adapter, /kind: 'insertAtCursor'/);
+  assert.match(adapter, /await requireCapability\('applyEditBatch'\)/);
+  assert.match(adapter, /EVENTS\.batchRequest/);
+  assert.doesNotMatch(adapter, /insertAtCursor\s*:/);
 });
 
-test('main bridge advertises capabilities and acknowledges insertions', () => {
+test('main bridge advertises and acknowledges anchored insertion batches', () => {
   const bridge = read('src/main/editorBridge/bridge.ts');
   assert.match(bridge, /HELLO_REQUEST_EVENT/);
   assert.match(bridge, /bridgeInstanceId: BRIDGE_INSTANCE_ID/);
   assert.match(bridge, /eventCursor: \+\+bridgeEventCursor/);
-  assert.match(bridge, /kind: 'insertAtCursor'/);
-  assert.match(bridge, /new CustomEvent\(APPLY_RESPONSE_EVENT/);
-  assert.doesNotMatch(bridge, /ageaf:editor:insert/);
+  assert.match(bridge, /applyEditBatch: editorReady/);
+  assert.match(bridge, /insertionTarget: editorReady/);
+  assert.match(bridge, /validateAnchoredInsertionBatch/);
+  assert.match(bridge, /new CustomEvent\(BATCH_RESPONSE_EVENT/);
+  assert.doesNotMatch(bridge, /['"]ageaf:editor:insert['"]/);
+  assert.doesNotMatch(bridge, /detail\.kind === 'insertAtCursor'/);
 });
 
-test('panel marks insert accepted only after an acknowledged result', () => {
+test('panel marks insert accepted only after a durable transaction receipt', () => {
   const panel = read('src/iso/panel/Panel.tsx');
+  assert.match(panel, /transactionRpc<EditTransactionV1>\(\s*'preflight'/);
+  assert.match(panel, /transactionRpc<EditTransactionV1>\(\s*'apply'/);
+  assert.match(panel, /resolvedTransaction\.receipt\?\.success !== true/);
   assert.match(
     panel,
-    /const result = await window\.ageafBridge\.insertAtCursor\(nextText\);[\s\S]*if \(!result\.ok\)[\s\S]*setPatchReviewTextAndStatus\(messageId, 'accepted', nextText\)/
+    /setPatchReviewTextAndStatus\(messageId, 'accepted', nextText\)/
   );
+  assert.doesNotMatch(panel, /ageafBridge\.insertAtCursor/);
 });

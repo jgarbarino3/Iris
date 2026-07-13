@@ -69,6 +69,10 @@ export type StoredPatchReview =
     text: string;
     status?: StoredPatchReviewStatus;
     hasAnimated?: boolean;
+    transactionId?: string;
+    transactionRevision?: number;
+    projectId?: string;
+    transactionError?: string;
   }
   | {
     kind: 'replaceRangeInFile';
@@ -367,6 +371,18 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       text,
       ...(status ? { status } : {}),
       ...(hasAnimated ? { hasAnimated } : {}),
+      ...(typeof raw.transactionId === 'string'
+        ? { transactionId: raw.transactionId }
+        : {}),
+      ...(Number.isInteger(raw.transactionRevision)
+        ? { transactionRevision: raw.transactionRevision }
+        : {}),
+      ...(typeof raw.projectId === 'string'
+        ? { projectId: raw.projectId }
+        : {}),
+      ...(typeof raw.transactionError === 'string'
+        ? { transactionError: raw.transactionError }
+        : {}),
     };
   }
 

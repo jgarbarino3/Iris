@@ -182,4 +182,34 @@ test('background transaction runtime persists proposals in extension IndexedDB',
     'proposed',
   ]);
   expect(rpcResult.serialized).not.toContain('SECRET_DO_NOT_PERSIST');
+
+  await harness.reload();
+  const afterReload = await harness.evaluate(
+    async (project) =>
+      new Promise<{
+        ok: boolean;
+        result?: Array<{ id: string; state: string }>;
+      }>((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            type: 'iris:transaction-runtime-test',
+            request: {
+              schemaVersion: 1,
+              protocolVersion: 1,
+              channel: 'iris:transaction-runtime',
+              requestId: 'browser-list-after-reload',
+              action: 'list',
+              payload: { projectId: project },
+            },
+          },
+          resolve
+        );
+      }),
+    projectId
+  );
+  expect(afterReload.ok).toBe(true);
+  expect(afterReload.result).toHaveLength(1);
+  expect(afterReload.result?.[0]?.id).toBe(
+    rpcResult.proposeResponse?.result?.id
+  );
 });

@@ -40,7 +40,7 @@ test('Panel records history for bulk and file-level review actions', () => {
   );
   assert.match(
     contents,
-    /const onBulkRejectAll = \(\) => \{[\s\S]*recordReviewAction\(/m
+    /const onBulkRejectAll = async \(\) => \{[\s\S]*recordReviewAction\(/m
   );
   assert.match(
     contents,

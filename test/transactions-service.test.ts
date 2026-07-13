@@ -28,6 +28,7 @@ const proposal = {
 
 const testHarnessContext = {
   boundProjectId: null,
+  tabId: null,
   source: 'test-harness' as const,
 };
 
@@ -608,6 +609,154 @@ test('runtime cancellation before dispatch leaves the transaction preflighted', 
       (await service.get(proposal.projectId, preflighted.id))?.state,
       'preflighted'
     );
+  } finally {
+    await repository.deleteDatabase();
+  }
+});
+
+test('timeout without a receipt stays applying and exact-after reconciliation recovers once', async () => {
+  const databaseName = `iris-test-${crypto.randomUUID()}`;
+  const repository = new IndexedDbTransactionRepository({ databaseName });
+  const service = new TransactionService({ repository });
+  let dispatchCount = 0;
+
+  try {
+    const proposed = await service.propose({
+      ...proposal,
+      idempotencyKey: 'timeout-reconcile',
+    });
+    const preflighted = await service.preflight(
+      proposal.projectId,
+      proposed.id,
+      proposed.revision,
+      'b'.repeat(64)
+    );
+    const uncertain = await service.apply(
+      proposal.projectId,
+      preflighted.id,
+      preflighted.revision,
+      async (request) => {
+        dispatchCount += 1;
+        return {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          requestId: request.requestId,
+          batchId: request.batchId,
+          success: false,
+          error: {
+            code: 'APPLY_TIMEOUT',
+            message: 'untrusted timeout detail',
+            at: Date.now(),
+          },
+        };
+      }
+    );
+    assert.equal(uncertain.state, 'applying');
+    assert.equal(uncertain.receipt, undefined);
+
+    const [recovered] = await service.reconcile(proposal.projectId, async () =>
+      'b'.repeat(64)
+    );
+    assert.equal(recovered.state, 'applied');
+    assert.equal(recovered.receipt?.success, true);
+    assert.equal(dispatchCount, 1);
+
+    await assert.rejects(
+      service.apply(
+        proposal.projectId,
+        preflighted.id,
+        preflighted.revision,
+        async () => {
+          dispatchCount += 1;
+          throw new Error('duplicate dispatch');
+        }
+      ),
+      (error: unknown) =>
+        Boolean(
+          error &&
+            typeof error === 'object' &&
+            'code' in error &&
+            error.code === 'STALE_REVISION'
+        )
+    );
+    assert.equal(dispatchCount, 1);
+  } finally {
+    await repository.deleteDatabase();
+  }
+});
+
+test('cancellation after editor dispatch reports reconciliation instead of success', async () => {
+  const databaseName = `iris-test-${crypto.randomUUID()}`;
+  const repository = new IndexedDbTransactionRepository({ databaseName });
+  const service = new TransactionService({ repository });
+  let dispatchStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    dispatchStarted = resolve;
+  });
+  let releaseDispatch!: (receipt: ReturnType<typeof validReceipt>) => void;
+  const handler = createTransactionRuntimeHandler({
+    service,
+    preflightTransaction: async () => ({
+      expectedPostApplySha256: 'b'.repeat(64),
+    }),
+    dispatchApply: async (request) =>
+      new Promise((resolve) => {
+        releaseDispatch = resolve;
+        dispatchStarted();
+      }),
+    readFileSha256: async () => 'b'.repeat(64),
+  });
+
+  try {
+    const proposed = await service.propose({
+      ...proposal,
+      idempotencyKey: 'cancel-after-dispatch',
+    });
+    const preflighted = await service.preflight(
+      proposal.projectId,
+      proposed.id,
+      proposed.revision,
+      'b'.repeat(64)
+    );
+    const applyPromise = handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'apply-after-dispatch',
+        action: 'apply',
+        payload: {
+          projectId: proposal.projectId,
+          id: preflighted.id,
+          expectedRevision: preflighted.revision,
+        },
+      },
+      testHarnessContext
+    );
+    await started;
+
+    const cancel = await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'late-cancel',
+        action: 'cancel',
+        payload: { targetRequestId: 'apply-after-dispatch' },
+      },
+      testHarnessContext
+    );
+    assert.deepEqual(cancel.result, {
+      cancelledBeforeDispatch: false,
+      reconcileRequired: true,
+    });
+
+    const applying = await service.get(proposal.projectId, preflighted.id);
+    releaseDispatch(
+      validReceipt(applying!.pendingApply!.request, 'b'.repeat(64))
+    );
+    const applied = await applyPromise;
+    assert.equal((applied.result as { state?: string })?.state, 'applied');
   } finally {
     await repository.deleteDatabase();
   }

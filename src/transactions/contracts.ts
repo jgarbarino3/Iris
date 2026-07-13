@@ -4,6 +4,7 @@ export const TRANSACTION_DATABASE_VERSION = 2 as const;
 
 export type TransactionRuntimeContext = {
   boundProjectId: string | null;
+  tabId: number | null;
   source: 'content-script' | 'test-harness';
 };
 
@@ -467,7 +468,6 @@ export function parsePreflightPayload(payload: unknown): {
   projectId: string;
   id: string;
   expectedRevision: number;
-  expectedPostApplySha256: string;
 } {
   const source = requireObject(payload);
   const expectedRevision = source.expectedRevision;
@@ -478,7 +478,6 @@ export function parsePreflightPayload(payload: unknown): {
     projectId: requireString(source, 'projectId'),
     id: requireString(source, 'id'),
     expectedRevision: expectedRevision as number,
-    expectedPostApplySha256: requireString(source, 'expectedPostApplySha256'),
   };
 }
 

@@ -41,6 +41,15 @@ import {
   type DiagnosticReportV1,
 } from '../api/client';
 import { runBrowserDiagnostics } from '../diagnostics/browserDiagnostics';
+import {
+  buildAnchoredInsertionProposal,
+  canonicalFilePath,
+} from '../../transactions/anchoredInsertion';
+import type {
+  EditTransactionV1,
+  TransactionRuntimeActionV1,
+  TransactionRuntimeResponseV1,
+} from '../../transactions/contracts';
 import type {
   NativeHostRequest,
   NativeHostResponse,
@@ -121,6 +130,33 @@ const EDITOR_OVERLAY_SHOW_EVENT = 'ageaf:editor:overlay:show';
 const EDITOR_OVERLAY_CLEAR_EVENT = 'ageaf:editor:overlay:clear';
 const EDITOR_OVERLAY_READY_EVENT = 'ageaf:editor:overlay:ready';
 const PANEL_OVERLAY_ACTION_EVENT = 'ageaf:panel:patch-review-action';
+
+async function transactionRpc<T = EditTransactionV1>(
+  action: TransactionRuntimeActionV1,
+  payload: unknown
+): Promise<T> {
+  const requestId = crypto.randomUUID();
+  const response = await new Promise<TransactionRuntimeResponseV1>((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: 'iris:transaction-runtime',
+        request: {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          channel: 'iris:transaction-runtime',
+          requestId,
+          action,
+          payload,
+        },
+      },
+      resolve
+    );
+  });
+  if (!response?.ok || response.result === undefined) {
+    throw new Error(response?.error?.message ?? 'Transaction request failed');
+  }
+  return response.result as T;
+}
 
 function isRuntimeAutonomous(provider: ProviderId, options: Options): boolean {
   if (provider === 'pi') return true;
@@ -1348,6 +1384,7 @@ const Panel = () => {
     force?: boolean;
   } | null>(null);
   const lineFromBackfillAttemptedRef = useRef<Set<string>>(new Set());
+  const insertionProjectionSyncRef = useRef<Set<string>>(new Set());
 
   const providerDisplay =
     PROVIDER_DISPLAY[chatProvider] ?? PROVIDER_DISPLAY.claude;
@@ -2969,6 +3006,92 @@ const Panel = () => {
     chatStateRef.current = next;
     scheduleChatSave();
   }, [messages, chatProvider]);
+
+  useEffect(() => {
+    for (const message of messages) {
+      const review = message.patchReview;
+      if (
+        !review ||
+        review.kind !== 'insertAtCursor' ||
+        !review.transactionId ||
+        !review.projectId
+      ) {
+        continue;
+      }
+      const syncKey = `${message.id}:${review.transactionId}`;
+      if (insertionProjectionSyncRef.current.has(syncKey)) continue;
+      insertionProjectionSyncRef.current.add(syncKey);
+
+      void (async () => {
+        let transaction = await transactionRpc<EditTransactionV1 | null>(
+          'get',
+          {
+            projectId: review.projectId,
+            id: review.transactionId,
+          }
+        );
+        if (!transaction) {
+          throw new Error('Durable insertion transaction is missing');
+        }
+        if (transaction.state === 'applying') {
+          await transactionRpc<EditTransactionV1[]>('reconcile', {
+            projectId: review.projectId,
+          });
+          transaction = await transactionRpc<EditTransactionV1 | null>(
+            'get',
+            {
+              projectId: review.projectId,
+              id: review.transactionId,
+            }
+          );
+          if (!transaction) {
+            throw new Error('Durable insertion transaction is missing');
+          }
+        }
+
+        const durableStatus: PatchReviewStatus =
+          transaction.state === 'applied' &&
+          transaction.receipt?.success === true
+            ? 'accepted'
+            : transaction.state === 'rejected'
+              ? 'rejected'
+              : 'pending';
+        const durableError =
+          transaction.state === 'failed' ||
+          transaction.state === 'conflicted' ||
+          (transaction.state === 'applied' &&
+            transaction.receipt?.success !== true)
+            ? transaction.failure?.message ??
+              'Insertion has no trustworthy persisted receipt'
+            : undefined;
+
+        setMessages((previous) =>
+          previous.map((entry) => {
+            if (entry.id !== message.id) return entry;
+            const current = entry.patchReview;
+            if (!current || current.kind !== 'insertAtCursor') return entry;
+            return {
+              ...entry,
+              patchReview: {
+                ...current,
+                status: durableStatus,
+                transactionRevision: transaction!.revision,
+                ...(durableError
+                  ? { transactionError: durableError }
+                  : { transactionError: undefined }),
+              },
+            };
+          })
+        );
+      })().catch((error) => {
+        setPatchActionErrors((previous) => ({
+          ...previous,
+          [message.id]:
+            error instanceof Error ? error.message : String(error),
+        }));
+      });
+    }
+  }, [messages]);
 
   const updateImageAttachments = (next: ImageAttachment[]) => {
     imageAttachmentsRef.current = next;
@@ -7222,6 +7345,130 @@ const Panel = () => {
       streamingCoTRef.current = [];
       sessionState.debugCliEventsEnabled = Boolean(options.debugCliEvents);
 
+      const commitPatchReviewMessage = (patchMessage: StoredMessage) => {
+        const latestState = chatStateRef.current;
+        const latestConversation = latestState
+          ? findConversation(latestState, sessionConversationId)
+          : null;
+        if (!latestState || !latestConversation) return;
+
+        const jobStillActive =
+          action === 'chat' &&
+          (sessionState.activeJobId === jobId ||
+            sessionState.isSending ||
+            sessionState.pendingDone != null);
+        if (jobStillActive) {
+          sessionState.pendingPatchReviewMessages = upsertPatchReviewMessage(
+            sessionState.pendingPatchReviewMessages,
+            patchMessage
+          );
+        }
+
+        const updatedStored = upsertPatchReviewMessage(
+          latestConversation.messages,
+          patchMessage
+        );
+        chatStateRef.current = setConversationMessages(
+          latestState,
+          latestConversation.provider,
+          sessionConversationId,
+          updatedStored
+        );
+        scheduleChatSave();
+
+        if (sessionConversationId === chatConversationIdRef.current) {
+          setMessages((prev) =>
+            upsertPatchReviewMessage(prev, createMessage(patchMessage))
+          );
+        }
+        if (jobStillActive) {
+          maybeFinalizeStream(sessionConversationId, provider);
+        }
+      };
+
+      const captureInsertionPatchMessage = async (
+        insertionText: string
+      ): Promise<StoredMessage> => {
+        try {
+          const projectId = getOverleafProjectIdFromPathname(
+            window.location.pathname
+          );
+          const bridge = window.ageafBridge;
+          if (!projectId || !bridge) {
+            throw new Error('Missing project or editor identity');
+          }
+          const target = await bridge.captureInsertionTarget();
+          const filePath = canonicalFilePath(target?.filePath ?? '');
+          if (
+            !target?.ok ||
+            target.projectId !== projectId ||
+            !filePath ||
+            typeof target.content !== 'string' ||
+            !Number.isInteger(target.offset) ||
+            target.offset < 0
+          ) {
+            throw new Error(
+              target?.error ?? 'Missing proposal-time insertion target'
+            );
+          }
+          if (
+            getOverleafProjectIdFromPathname(window.location.pathname) !==
+            projectId
+          ) {
+            throw new Error('Proposal target identity changed during capture');
+          }
+          const proposal = await buildAnchoredInsertionProposal({
+            projectId,
+            filePath,
+            ...(target.fileId ? { fileId: target.fileId } : {}),
+            content: target.content,
+            offset: target.offset,
+            insertionText,
+            idempotencySeed: `${sessionConversationId}:${jobId}`,
+            conversationId: sessionConversationId,
+            sourceJobId: jobId,
+            provenance: {
+              provider,
+              ...(currentModel ? { model: currentModel } : {}),
+              requestSummary: 'Insert proposed text at recorded cursor',
+              contextCategories: [
+                'active-file',
+                'cursor',
+                'adjacent-anchors',
+              ],
+            },
+          });
+          const transaction = await transactionRpc<EditTransactionV1>(
+            'propose',
+            proposal
+          );
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'insertAtCursor',
+              text: insertionText,
+              status: 'pending',
+              transactionId: transaction.id,
+              transactionRevision: transaction.revision,
+              projectId: transaction.projectId,
+            },
+          };
+        } catch (error) {
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'insertAtCursor',
+              text: insertionText,
+              status: 'pending',
+              transactionError:
+                error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      };
+
       await streamJobEvents(
         options,
         jobId,
@@ -7851,82 +8098,14 @@ const Panel = () => {
                 },
               };
             } else if (patch.kind === 'insertAtCursor') {
-              storedPatchReviewMessage = {
-                role: 'system',
-                content: '',
-                patchReview: {
-                  kind: 'insertAtCursor',
-                  text: patch.text,
-                  status: 'pending',
-                },
-              };
+              void captureInsertionPatchMessage(patch.text).then(
+                commitPatchReviewMessage
+              );
+              return;
             }
 
             if (!storedPatchReviewMessage) return;
-            const patchMessage: StoredMessage = storedPatchReviewMessage;
-
-            // For chat actions during an active job, queue the review card
-            // so it is flushed after the assistant message in maybeFinalizeStream.
-            if (action === 'chat') {
-              const jobStillActive =
-                sessionState.activeJobId === jobId ||
-                sessionState.isSending ||
-                sessionState.pendingDone != null;
-              if (jobStillActive) {
-                sessionState.pendingPatchReviewMessages = upsertPatchReviewMessage(
-                  sessionState.pendingPatchReviewMessages,
-                  patchMessage
-                );
-
-                // Persist during streaming so accept/reject works immediately.
-                const latestState = chatStateRef.current;
-                const latestConversation = latestState
-                  ? findConversation(latestState, sessionConversationId)
-                  : null;
-                const baseState = latestState ?? state;
-                const baseConversation = latestConversation ?? conversation;
-                const updatedStored = upsertPatchReviewMessage(
-                  baseConversation.messages,
-                  patchMessage
-                );
-                chatStateRef.current = setConversationMessages(
-                  baseState,
-                  baseConversation.provider,
-                  sessionConversationId,
-                  updatedStored
-                );
-                scheduleChatSave();
-
-                // Render card immediately while streaming.
-                if (sessionConversationId === chatConversationIdRef.current) {
-                  setMessages((prev) =>
-                    upsertPatchReviewMessage(prev, createMessage(patchMessage))
-                  );
-                }
-
-                // If done already arrived and tokens drained, finalize now.
-                maybeFinalizeStream(sessionConversationId, provider);
-                return;
-              }
-            }
-
-            // Fallback: job already finished or non-chat action — append directly.
-            const updatedMessages = upsertPatchReviewMessage(
-              conversation.messages,
-              patchMessage
-            );
-            chatStateRef.current = setConversationMessages(
-              state,
-              conversation.provider,
-              sessionConversationId,
-              updatedMessages
-            );
-            scheduleChatSave();
-
-            // Only update UI if this is the current session
-            if (sessionConversationId === chatConversationIdRef.current) {
-              setMessages(updatedMessages.map((m) => createMessage(m)));
-            }
+            commitPatchReviewMessage(storedPatchReviewMessage);
           }
 
           if (event.event === 'done') {
@@ -8957,9 +9136,6 @@ const Panel = () => {
       if (window.ageafBridge?.redoEditor) {
         return await window.ageafBridge.redoEditor();
       }
-      if (appliedText && window.ageafBridge?.insertAtCursor) {
-        return await window.ageafBridge.insertAtCursor(appliedText);
-      }
       return { ok: false, error: 'Redo bridge unavailable' };
     }
 
@@ -9038,14 +9214,87 @@ const Panel = () => {
     return true;
   };
 
-  const onRejectPatchReviewMessage = (messageId: string) => {
+  const rejectInsertionTransaction = async (
+    patchReview: StoredPatchReview & { kind: 'insertAtCursor' }
+  ): Promise<EditTransactionV1> => {
+    if (!patchReview.transactionId || !patchReview.projectId) {
+      throw new Error(
+        patchReview.transactionError ?? 'Insertion target identity is unavailable'
+      );
+    }
+    let transaction = await transactionRpc<EditTransactionV1 | null>('get', {
+      projectId: patchReview.projectId,
+      id: patchReview.transactionId,
+    });
+    if (!transaction) {
+      throw new Error('Durable insertion transaction is missing');
+    }
+    if (transaction.state === 'applying') {
+      await transactionRpc<EditTransactionV1[]>('reconcile', {
+        projectId: patchReview.projectId,
+      });
+      transaction = await transactionRpc<EditTransactionV1 | null>('get', {
+        projectId: patchReview.projectId,
+        id: patchReview.transactionId,
+      });
+    }
+    if (!transaction) {
+      throw new Error('Durable insertion transaction is missing');
+    }
+    if (transaction.state === 'applied') {
+      throw new Error('Applied insertion cannot be cancelled');
+    }
+    if (transaction.state !== 'rejected') {
+      transaction = await transactionRpc<EditTransactionV1>('reject', {
+        projectId: patchReview.projectId,
+        id: patchReview.transactionId,
+        expectedRevision: transaction.revision,
+      });
+    }
+    if (transaction.state !== 'rejected') {
+      throw new Error('Insertion rejection was not persisted');
+    }
+    return transaction;
+  };
+
+  const onRejectPatchReviewMessage = async (messageId: string) => {
     if (bulkActionBusy) return;
     const latest = messagesRef.current.find((message) => message.id === messageId);
     const patchReview = latest?.patchReview;
     if (!patchReview) return;
     const prevStatus = ((patchReview as any).status ?? 'pending') as PatchReviewStatus;
     if (prevStatus !== 'pending') return;
-    setPatchReviewStatus(messageId, 'rejected');
+    if (
+      patchReview.kind === 'insertAtCursor' &&
+      patchReview.transactionId &&
+      patchReview.projectId
+    ) {
+      setPatchActionBusyId(messageId);
+      try {
+        const transaction = await rejectInsertionTransaction(patchReview);
+        updatePatchReviewMessage(messageId, (current) =>
+          current.kind === 'insertAtCursor'
+            ? {
+                ...current,
+                status: 'rejected',
+                transactionRevision: transaction!.revision,
+                transactionError: undefined,
+              }
+            : current
+        );
+      } catch (error) {
+        setPatchActionErrors((previous) => ({
+          ...previous,
+          [messageId]:
+            error instanceof Error ? error.message : String(error),
+        }));
+        return;
+      } finally {
+        setPatchActionBusyId(null);
+      }
+    } else {
+      setPatchReviewStatus(messageId, 'rejected');
+    }
     clearPatchErrorForMessage(messageId);
     recordReviewAction({
       messageId,
@@ -9200,18 +9449,99 @@ const Panel = () => {
       }
 
       if (patchReview.kind === 'insertAtCursor') {
-        if (!window.ageafBridge) return false;
         const nextText =
           typeof overrideText === 'string' ? overrideText : patchReview.text;
-        const result = await window.ageafBridge.insertAtCursor(nextText);
-        if (!result.ok) {
+        if (
+          !patchReview.transactionId ||
+          typeof patchReview.transactionRevision !== 'number' ||
+          !patchReview.projectId ||
+          patchReview.transactionError ||
+          nextText !== patchReview.text
+        ) {
           setPatchActionErrors((prev) => ({
             ...prev,
-            [messageId]: result.error ?? 'Unable to insert text',
+            [messageId]:
+              patchReview.transactionError ??
+              (nextText !== patchReview.text
+                ? 'Edited insertion text requires a new proposal'
+                : 'Insertion target identity is unavailable'),
           }));
           return false;
         }
-        setPatchReviewTextAndStatus(messageId, 'accepted', nextText);
+        let transaction = await transactionRpc<EditTransactionV1 | null>(
+          'get',
+          {
+            projectId: patchReview.projectId,
+            id: patchReview.transactionId,
+          }
+        );
+        if (!transaction) {
+          throw new Error('Durable insertion transaction is missing');
+        }
+        if (
+          transaction.state === 'proposed' &&
+          transaction.revision !== patchReview.transactionRevision
+        ) {
+          throw new Error('Insertion proposal revision is stale');
+        }
+        if (transaction.state === 'proposed') {
+          transaction = await transactionRpc<EditTransactionV1>('preflight', {
+            projectId: patchReview.projectId,
+            id: patchReview.transactionId,
+            expectedRevision: transaction.revision,
+          });
+        }
+        if (transaction.state === 'preflighted') {
+          transaction = await transactionRpc<EditTransactionV1>('apply', {
+            projectId: patchReview.projectId,
+            id: patchReview.transactionId,
+            expectedRevision: transaction.revision,
+          });
+        }
+        if (transaction.state === 'applying') {
+          await transactionRpc<EditTransactionV1[]>('reconcile', {
+            projectId: patchReview.projectId,
+          });
+          transaction = await transactionRpc<EditTransactionV1 | null>(
+            'get',
+            {
+              projectId: patchReview.projectId,
+              id: patchReview.transactionId,
+            }
+          );
+          if (!transaction) {
+            throw new Error('Durable insertion transaction is missing');
+          }
+        }
+        if (!transaction) {
+          throw new Error('Durable insertion transaction is missing');
+        }
+        const resolvedTransaction = transaction;
+        if (
+          resolvedTransaction.state !== 'applied' ||
+          resolvedTransaction.receipt?.success !== true
+        ) {
+          const failureMessage =
+            resolvedTransaction.failure?.message ??
+            'Insertion was not acknowledged by a durable receipt';
+          setPatchActionErrors((prev) => ({
+            ...prev,
+            [messageId]: failureMessage,
+          }));
+          return false;
+        }
+        const appliedTransaction = resolvedTransaction;
+        updatePatchReviewMessage(messageId, (current) =>
+          current.kind === 'insertAtCursor'
+            ? {
+                ...current,
+                text: nextText,
+                status: 'accepted',
+                transactionRevision: appliedTransaction.revision,
+                transactionError: undefined,
+              }
+            : current
+        );
         return true;
       }
 
@@ -9338,45 +9668,56 @@ const Panel = () => {
     }
   };
 
-  const onBulkRejectAll = () => {
+  const onBulkRejectAll = async () => {
     if (bulkActionBusy || patchActionBusyId) return;
-    const pendingEntries = messagesRef.current
-      .filter((message) => {
-        if (!message.patchReview) return false;
-        const status = (message.patchReview as any).status ?? 'pending';
-        return status === 'pending';
-      })
-      .map((message) => ({
-        messageId: message.id,
-        patchKind: message.patchReview!.kind,
-        prevStatus: ((message.patchReview as any).status ??
-          'pending') as PatchReviewStatus,
-      }));
+    const pendingEntries = messagesRef.current.filter((message) => {
+      if (!message.patchReview) return false;
+      const status = (message.patchReview as any).status ?? 'pending';
+      return status === 'pending';
+    });
     if (pendingEntries.length === 0) return;
 
-    setMessages((prev) =>
-      prev.map((message) => {
-        if (!message.patchReview) return message;
-        const status = (message.patchReview as any).status ?? 'pending';
-        if (status !== 'pending') return message;
-        return {
-          ...message,
-          patchReview: {
-            ...message.patchReview,
-            status: 'rejected',
-          } as any,
-        };
-      })
-    );
-    setPatchActionErrors({});
-    for (const entry of pendingEntries) {
-      recordReviewAction({
-        messageId: entry.messageId,
-        action: 'reject',
-        prevStatus: entry.prevStatus,
-        nextStatus: 'rejected',
-        patchKind: entry.patchKind,
-      });
+    setBulkActionBusy(true);
+    try {
+      for (const entry of pendingEntries) {
+        const patchReview = entry.patchReview;
+        if (!patchReview) continue;
+        const prevStatus = ((patchReview as any).status ??
+          'pending') as PatchReviewStatus;
+        try {
+          if (patchReview.kind === 'insertAtCursor') {
+            const transaction = await rejectInsertionTransaction(patchReview);
+            updatePatchReviewMessage(entry.id, (current) =>
+              current.kind === 'insertAtCursor'
+                ? {
+                    ...current,
+                    status: 'rejected',
+                    transactionRevision: transaction.revision,
+                    transactionError: undefined,
+                  }
+                : current
+            );
+          } else {
+            setPatchReviewStatus(entry.id, 'rejected');
+          }
+          clearPatchErrorForMessage(entry.id);
+          recordReviewAction({
+            messageId: entry.id,
+            action: 'reject',
+            prevStatus,
+            nextStatus: 'rejected',
+            patchKind: patchReview.kind,
+          });
+        } catch (error) {
+          setPatchActionErrors((previous) => ({
+            ...previous,
+            [entry.id]:
+              error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }
+    } finally {
+      setBulkActionBusy(false);
     }
   };
 

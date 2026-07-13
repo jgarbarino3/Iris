@@ -17,10 +17,18 @@ import type { TransactionService } from './transactionService';
 
 export type TransactionRuntimeDependencies = {
   service: TransactionService;
+  preflightTransaction: (
+    transaction: EditTransactionV1,
+    context: TransactionRuntimeContext
+  ) => Promise<{ expectedPostApplySha256: string }>;
   dispatchApply: (
-    request: ApplyEditBatchRequestV1
+    request: ApplyEditBatchRequestV1,
+    context: TransactionRuntimeContext
   ) => Promise<ApplyEditBatchReceiptV1>;
-  readFileSha256: (transaction: EditTransactionV1) => Promise<string>;
+  readFileSha256: (
+    transaction: EditTransactionV1,
+    context: TransactionRuntimeContext
+  ) => Promise<string>;
 };
 
 function objectPayload(payload: unknown): Record<string, unknown> {
@@ -45,6 +53,10 @@ export function createTransactionRuntimeHandler(
   context: TransactionRuntimeContext
 ) => Promise<TransactionRuntimeResponseV1> {
   const cancelledRequestIds = new Set<string>();
+  const applyRequestStates = new Map<
+    string,
+    'pending' | 'dispatching' | 'settled'
+  >();
   return async (request, context) => {
     const response = (
       value: Omit<
@@ -73,10 +85,20 @@ export function createTransactionRuntimeHandler(
       const payload = objectPayload(request.payload);
       let result: unknown;
       switch (request.action) {
-        case 'cancel':
-          cancelledRequestIds.add(stringField(payload, 'targetRequestId'));
-          result = { cancelledBeforeDispatch: true };
+        case 'cancel': {
+          const targetRequestId = stringField(payload, 'targetRequestId');
+          const applyState = applyRequestStates.get(targetRequestId);
+          if (applyState === 'dispatching' || applyState === 'settled') {
+            result = {
+              cancelledBeforeDispatch: false,
+              reconcileRequired: applyState === 'dispatching',
+            };
+          } else {
+            cancelledRequestIds.add(targetRequestId);
+            result = { cancelledBeforeDispatch: true };
+          }
           break;
+        }
         case 'propose': {
           const proposal = parseProposePayload(payload);
           enforceRuntimeProjectScope(proposal.projectId, context);
@@ -98,16 +120,56 @@ export function createTransactionRuntimeHandler(
         case 'preflight': {
           const scoped = parsePreflightPayload(payload);
           enforceRuntimeProjectScope(scoped.projectId, context);
+          const transaction = await dependencies.service.get(
+            scoped.projectId,
+            scoped.id
+          );
+          if (!transaction) {
+            throw new TransactionError(
+              'INVALID_REQUEST',
+              `Unknown transaction ${scoped.id}`
+            );
+          }
+          if (transaction.revision !== scoped.expectedRevision) {
+            throw new TransactionError(
+              'STALE_REVISION',
+              `Expected revision ${scoped.expectedRevision}, found ${transaction.revision}`
+            );
+          }
+          let preflight: { expectedPostApplySha256: string };
+          try {
+            preflight = await dependencies.preflightTransaction(
+              transaction,
+              context
+            );
+          } catch (error) {
+            const transactionError =
+              error instanceof TransactionError
+                ? error
+                : new TransactionError(
+                    'APPLY_FAILED',
+                    'Insertion preflight failed'
+                  );
+            await dependencies.service.failPreflight(
+              scoped.projectId,
+              scoped.id,
+              scoped.expectedRevision,
+              transactionError.code
+            );
+            throw transactionError;
+          }
           result = await dependencies.service.preflight(
             scoped.projectId,
             scoped.id,
             scoped.expectedRevision,
-            scoped.expectedPostApplySha256
+            preflight.expectedPostApplySha256
           );
           break;
         }
         case 'apply': {
+          applyRequestStates.set(request.requestId, 'pending');
           if (cancelledRequestIds.delete(request.requestId)) {
+            applyRequestStates.set(request.requestId, 'settled');
             throw new TransactionError(
               'CANCELLED_BEFORE_DISPATCH',
               'Apply was cancelled before editor dispatch'
@@ -115,12 +177,26 @@ export function createTransactionRuntimeHandler(
           }
           const scoped = parseRevisionScopedPayload(payload);
           enforceRuntimeProjectScope(scoped.projectId, context);
-          result = await dependencies.service.apply(
-            scoped.projectId,
-            scoped.id,
-            scoped.expectedRevision,
-            dependencies.dispatchApply
-          );
+          applyRequestStates.set(request.requestId, 'dispatching');
+          try {
+            result = await dependencies.service.apply(
+              scoped.projectId,
+              scoped.id,
+              scoped.expectedRevision,
+              (applyRequest) =>
+                dependencies.dispatchApply(applyRequest, context)
+            );
+          } finally {
+            applyRequestStates.set(request.requestId, 'settled');
+            if (applyRequestStates.size > 256) {
+              for (const [id, state] of applyRequestStates) {
+                if (state === 'settled' && id !== request.requestId) {
+                  applyRequestStates.delete(id);
+                  break;
+                }
+              }
+            }
+          }
           break;
         }
         case 'reject': {
@@ -148,7 +224,7 @@ export function createTransactionRuntimeHandler(
           enforceRuntimeProjectScope(projectId, context);
           result = await dependencies.service.reconcile(
             projectId,
-            dependencies.readFileSha256
+            (transaction) => dependencies.readFileSha256(transaction, context)
           );
           break;
         }

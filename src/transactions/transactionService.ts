@@ -13,12 +13,14 @@ import {
   type ProposeEditTransactionV1,
   type EditTransactionState,
   type TransactionFailureV1,
+  type TransactionErrorCode,
   type TransactionJournalEventV1,
   TransactionError,
   isSha256,
   sanitizeProvenance,
 } from './contracts';
 import type { IndexedDbTransactionRepository } from './indexedDbRepository';
+import { transactionToBatchRequest } from './anchoredInsertion';
 
 type TransactionServiceOptions = {
   repository: IndexedDbTransactionRepository;
@@ -120,6 +122,30 @@ export class TransactionService {
     });
   }
 
+  failPreflight(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    code: TransactionErrorCode
+  ): Promise<EditTransactionV1> {
+    const failure = sanitizeFailure(code, this.now());
+    const conflicted = [
+      'WRONG_PROJECT',
+      'WRONG_FILE',
+      'STALE_HASH',
+      'EXPECTED_TEXT_MISMATCH',
+      'AMBIGUOUS_ANCHOR',
+    ].includes(code);
+    return this.transition(
+      projectId,
+      id,
+      expectedRevision,
+      conflicted ? 'conflicted' : 'failed',
+      conflicted ? {} : { failedAt: failure.at },
+      failure
+    );
+  }
+
   reject(
     projectId: string,
     id: string,
@@ -156,28 +182,11 @@ export class TransactionService {
         `Expected revision ${expectedRevision}, found ${current.revision}`
       );
     }
-    const request: ApplyEditBatchRequestV1 = {
-      schemaVersion: 1,
-      protocolVersion: 1,
-      requestId: this.createId(),
-      batchId: this.createId(),
-      projectId: current.projectId,
-      filePath: current.target.filePath,
-      ...(current.target.fileId ? { fileId: current.target.fileId } : {}),
-      expectedBaseSha256: current.baseContentSha256,
-      changes: [
-        {
-          transactionId: current.id,
-          from: current.target.from,
-          to: current.target.to,
-          expectedText: current.expectedText,
-          replacementText: current.replacementText,
-          prefix: current.prefix,
-          suffix: current.suffix,
-          proposalOrder: current.proposalOrder,
-        },
-      ],
-    };
+    const request = transactionToBatchRequest(
+      current,
+      this.createId(),
+      this.createId()
+    );
     const applying = await this.transition(
       projectId,
       id,
@@ -190,7 +199,10 @@ export class TransactionService {
     let rawReceipt: ApplyEditBatchReceiptV1;
     try {
       rawReceipt = await dispatch(request);
-    } catch {
+    } catch (error) {
+      if (error instanceof TransactionError && error.code === 'APPLY_TIMEOUT') {
+        return applying;
+      }
       const failure = sanitizeFailure('APPLY_FAILED', this.now());
       return this.transition(
         projectId,
@@ -202,6 +214,13 @@ export class TransactionService {
       );
     }
     try {
+      if (
+        rawReceipt.success === false &&
+        (rawReceipt.error?.code === 'APPLY_TIMEOUT' ||
+          rawReceipt.error?.code === 'RECOVERY_REQUIRED')
+      ) {
+        return applying;
+      }
       const receipt = parseAndValidateSuccessReceipt(
         rawReceipt,
         request,

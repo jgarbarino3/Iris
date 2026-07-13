@@ -160,6 +160,25 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - Deterministic Playwright browser gate: 2 passed, including extension-harness RPC persistence, IndexedDB schema version 2, and cross-project `WRONG_PROJECT` denial.
 - Remote GitHub Actions Verify run `29242104581` for commit `ce0a5d4` completed successfully on `codex/iris-phases-0-2`.
 
+### P2-02 — Anchored insertion cutover (implemented, unproven)
+
+- One atomic proposal-time bridge snapshot records the Overleaf project ID, canonical file path, file identity when available, cursor offset, full file content, SHA-256, exact prefix/suffix anchors bounded to 256 characters, insertion text, sanitized provenance, and a stable project-scoped idempotency identity before the background-owned transaction is created.
+- Acceptance addresses the recorded transaction and expected revision, asks the initiating tab to preflight the recorded project/file/hash/offset/anchors, persists the computed post-apply hash, records applying intent before dispatch, and sends exactly one acknowledged one-change batch through the existing central editor adapter and main-world bridge. The bridge restores the original active file best-effort after validation/application.
+- The bridge rejects wrong project, wrong canonical path/file identity, stale hash/content, absent anchors, and ambiguous anchors. It never chooses a nearest location or the current cursor. Request/batch identity deduplicates duplicate and late delivery; service CAS, durable applying intent, exact receipt validation, and restart reconciliation prevent more than one editor mutation.
+- A timeout without a trustworthy receipt remains `applying` and must reconcile. Cancellation before dispatch prevents mutation; a cancellation arriving after dispatch reports reconciliation required instead of claiming success. The panel marks accepted only after the durable transaction is `applied` with a persisted sanitized `receipt.success === true`.
+- The production direct `window.ageafBridge.insertAtCursor(...)` acceptance path and redo fallback were removed. Selection and file/range replacement writers were not changed.
+- Focused cutover command: `node --test test/editor-adapter-contract.test.cjs test/panel-insert-at-cursor-review.test.cjs test/panel-insert-at-cursor-patch-output.test.cjs test/transaction-background-contract.test.cjs` — 8 passed, 0 failed.
+- Root `npm test` — 392 CommonJS tests and 25 TypeScript transaction tests passed, 0 failed (417 total).
+- `npm run format:check` — passed.
+- `npm run typecheck` — passed.
+- `npm run build` — passed after replacing generated iCloud-dataless `node_modules` from the committed lockfile with `npm ci`; Webpack compiled the production extension.
+- `npm --prefix host run typecheck && npm --prefix host test && npm --prefix host run build` — passed; 318 host tests, 0 failed.
+- `npm run test:browser` — passed with four tests, one worker, and zero retries. The new real adapter→main-world bridge→fake CodeMirror fixture proves atomic target capture, cursor movement and file switching after proposal, recorded-file insertion, original active-file restoration, duplicate delivery with exactly one dispatch and identical receipt, wrong project/file, stale content/hash, absent anchors, ambiguous anchors, and no current-cursor/current-file fallback. The transaction runtime fixture also proves IndexedDB persistence after harness reload.
+- `git diff --check` — passed.
+- `npm --prefix host run verify` and the top-level `npm run verify` reached the host format gate and stopped only because the host glob includes the preserved protected untracked file `host/src/auth/pairing 2.ts`, which is not Prettier-clean. The protected file was not modified or formatted; all substantive host typecheck/test/build gates passed separately.
+- Automated P2-02 verification passed; live authenticated Overleaf smoke remains unproven.
+- P2-02 remains `active`; P2-03 remains `pending` and was not implemented.
+
 ## Final acceptance
 
 Pending full root/host verification, deterministic browser suite, displaced-path audit, private Overleaf smoke, correctness review, maintainability review, and final diff review.

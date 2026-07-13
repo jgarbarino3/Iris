@@ -40,7 +40,7 @@ test('Panel defines bulk accept and bulk reject handlers', () => {
 
   assert.match(contents, /const \[bulkActionBusy,\s*setBulkActionBusy\] = useState\(false\)/);
   assert.match(contents, /const onBulkAcceptAll = async \(\) => \{/);
-  assert.match(contents, /const onBulkRejectAll = \(\) => \{/);
+  assert.match(contents, /const onBulkRejectAll = async \(\) => \{/);
 });
 
 test('Panel renders FileChangeSummaryCard with summary props', () => {
