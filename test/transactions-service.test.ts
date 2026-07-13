@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import 'fake-indexeddb/auto';
 
+import { FAILURE_MESSAGES } from '../src/transactions/contracts.ts';
 import { IndexedDbTransactionRepository } from '../src/transactions/indexedDbRepository.ts';
 import { TransactionService } from '../src/transactions/transactionService.ts';
 import { createTransactionRuntimeHandler } from '../src/transactions/runtime.ts';
@@ -25,6 +26,44 @@ const proposal = {
   baseContentSha256: 'a'.repeat(64),
 };
 
+const testHarnessContext = {
+  boundProjectId: null,
+  source: 'test-harness' as const,
+};
+
+function validReceipt(
+  request: {
+    requestId: string;
+    batchId: string;
+    expectedBaseSha256: string;
+    changes: Array<{
+      transactionId: string;
+      from: number;
+      to: number;
+      expectedText: string;
+      replacementText: string;
+    }>;
+  },
+  afterSha256: string
+) {
+  return {
+    schemaVersion: 1 as const,
+    protocolVersion: 1 as const,
+    requestId: request.requestId,
+    batchId: request.batchId,
+    success: true,
+    beforeSha256: request.expectedBaseSha256,
+    afterSha256,
+    appliedChanges: request.changes.map((change) => ({
+      transactionId: change.transactionId,
+      from: change.from,
+      to: change.to,
+      oldText: change.expectedText,
+      newText: change.replacementText,
+    })),
+  };
+}
+
 test('replaying one proposal returns one durable transaction and one journal event', async () => {
   const databaseName = `iris-test-${crypto.randomUUID()}`;
   const repository = new IndexedDbTransactionRepository({ databaseName });
@@ -44,7 +83,9 @@ test('replaying one proposal returns one durable transaction and one journal eve
       [first.id]
     );
     assert.deepEqual(
-      (await service.getJournal(first.id)).map(({ toState }) => toState),
+      (await service.getJournal(proposal.projectId, first.id)).map(
+        ({ toState }) => toState
+      ),
       ['proposed']
     );
   } finally {
@@ -63,6 +104,7 @@ test('state transitions use compare-and-swap revisions and append the journal at
       idempotencyKey: 'job-2:patch-1',
     });
     const preflighted = await service.preflight(
+      proposal.projectId,
       proposed.id,
       proposed.revision,
       'b'.repeat(64)
@@ -72,7 +114,7 @@ test('state transitions use compare-and-swap revisions and append the journal at
     assert.equal(preflighted.revision, 1);
     assert.equal(preflighted.expectedPostApplySha256, 'b'.repeat(64));
     await assert.rejects(
-      service.reject(proposed.id, proposed.revision),
+      service.reject(proposal.projectId, proposed.id, proposed.revision),
       (error: unknown) =>
         error instanceof Error &&
         error.name === 'TransactionError' &&
@@ -80,10 +122,12 @@ test('state transitions use compare-and-swap revisions and append the journal at
         error.code === 'STALE_REVISION'
     );
     assert.deepEqual(
-      (await service.getJournal(proposed.id)).map(({ revision, toState }) => ({
-        revision,
-        toState,
-      })),
+      (await service.getJournal(proposal.projectId, proposed.id)).map(
+        ({ revision, toState }) => ({
+          revision,
+          toState,
+        })
+      ),
       [
         { revision: 0, toState: 'proposed' },
         { revision: 1, toState: 'preflighted' },
@@ -105,39 +149,29 @@ test('apply reaches applied only after a successful acknowledged receipt is dura
       idempotencyKey: 'job-3:patch-1',
     });
     const preflighted = await service.preflight(
+      proposal.projectId,
       proposed.id,
       proposed.revision,
       'b'.repeat(64)
     );
     const applied = await service.apply(
+      proposal.projectId,
       preflighted.id,
       preflighted.revision,
-      async (request) => ({
-        schemaVersion: 1,
-        protocolVersion: 1,
-        requestId: request.requestId,
-        batchId: request.batchId,
-        success: true,
-        beforeSha256: proposal.baseContentSha256,
-        afterSha256: 'b'.repeat(64),
-        appliedChanges: [
-          {
-            transactionId: proposed.id,
-            from: proposal.target.from,
-            to: proposal.target.to,
-            oldText: proposal.expectedText,
-            newText: proposal.replacementText,
-          },
-        ],
-      })
+      async (request) => validReceipt(request, 'b'.repeat(64))
     );
 
     assert.equal(applied.state, 'applied');
     assert.equal(applied.revision, 3);
     assert.equal(applied.receipt?.success, true);
-    assert.equal((await service.get(applied.id))?.state, 'applied');
+    assert.equal(
+      (await service.get(proposal.projectId, applied.id))?.state,
+      'applied'
+    );
     assert.deepEqual(
-      (await service.getJournal(applied.id)).map(({ toState }) => toState),
+      (await service.getJournal(proposal.projectId, applied.id)).map(
+        ({ toState }) => toState
+      ),
       ['proposed', 'preflighted', 'applying', 'applied']
     );
   } finally {
@@ -155,7 +189,12 @@ test('restart reconciliation resets safe states, recovers exact-after apply, and
       ...proposal,
       idempotencyKey: 'restart-safe',
     });
-    await service.preflight(safe.id, safe.revision, 'b'.repeat(64));
+    await service.preflight(
+      proposal.projectId,
+      safe.id,
+      safe.revision,
+      'b'.repeat(64)
+    );
     const [reset] = await service.reconcile(
       proposal.projectId,
       async () => proposal.baseContentSha256
@@ -167,12 +206,14 @@ test('restart reconciliation resets safe states, recovers exact-after apply, and
       idempotencyKey: 'restart-after',
     });
     const recoveredPreflight = await service.preflight(
+      proposal.projectId,
       recoveredProposal.id,
       recoveredProposal.revision,
       'b'.repeat(64)
     );
     let release!: (value: never) => void;
     const pendingApply = service.apply(
+      proposal.projectId,
       recoveredPreflight.id,
       recoveredPreflight.revision,
       () =>
@@ -200,11 +241,13 @@ test('restart reconciliation resets safe states, recovers exact-after apply, and
       idempotencyKey: 'restart-drift',
     });
     const driftPreflight = await service.preflight(
+      proposal.projectId,
       driftProposal.id,
       driftProposal.revision,
       'b'.repeat(64)
     );
     const driftPending = service.apply(
+      proposal.projectId,
       driftPreflight.id,
       driftPreflight.revision,
       () => new Promise(() => undefined)
@@ -237,45 +280,54 @@ test('runtime RPC validates protocol and persists only allowlisted provenance', 
   const sentinel = 'SECRET_DO_NOT_PERSIST';
 
   try {
-    const incompatible = await handler({
-      schemaVersion: 1,
-      protocolVersion: 999 as 1,
-      channel: 'iris:transaction-runtime',
-      requestId: 'bad-protocol',
-      action: 'list',
-      payload: { projectId: proposal.projectId },
-    });
+    const incompatible = await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 999 as 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'bad-protocol',
+        action: 'list',
+        payload: { projectId: proposal.projectId },
+      },
+      testHarnessContext
+    );
     assert.equal(incompatible.error?.code, 'PROTOCOL_MISMATCH');
 
-    const invalidList = await handler({
-      schemaVersion: 1,
-      protocolVersion: 1,
-      channel: 'iris:transaction-runtime',
-      requestId: 'bad-list',
-      action: 'list',
-      payload: { authorization: sentinel },
-    });
+    const invalidList = await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'bad-list',
+        action: 'list',
+        payload: { authorization: sentinel },
+      },
+      testHarnessContext
+    );
     assert.equal(invalidList.error?.code, 'INVALID_REQUEST');
 
-    const created = await handler({
-      schemaVersion: 1,
-      protocolVersion: 1,
-      channel: 'iris:transaction-runtime',
-      requestId: 'create-1',
-      action: 'propose',
-      payload: {
-        ...proposal,
-        idempotencyKey: 'rpc-proposal',
-        authorization: sentinel,
-        provenance: {
-          provider: 'codex',
-          model: 'gpt-test',
-          requestSummary: 'Replace greeting',
-          contextCategories: ['selection'],
-          accessToken: sentinel,
+    const created = await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'create-1',
+        action: 'propose',
+        payload: {
+          ...proposal,
+          idempotencyKey: 'rpc-proposal',
+          authorization: sentinel,
+          provenance: {
+            provider: 'codex',
+            model: 'gpt-test',
+            requestSummary: 'Replace greeting',
+            contextCategories: ['selection'],
+            accessToken: sentinel,
+          },
         },
       },
-    });
+      testHarnessContext
+    );
     assert.equal(created.ok, true);
     assert.doesNotMatch(JSON.stringify(created), new RegExp(sentinel));
     const listed = await service.list({ projectId: proposal.projectId });
@@ -302,17 +354,19 @@ test('apply persists applying intent and journal before editor dispatch', async 
       idempotencyKey: 'apply-before-dispatch',
     });
     const preflighted = await service.preflight(
+      proposal.projectId,
       proposed.id,
       proposed.revision,
       'b'.repeat(64)
     );
     let dispatchStarted = false;
     await service.apply(
+      proposal.projectId,
       preflighted.id,
       preflighted.revision,
       async (request) => {
         dispatchStarted = true;
-        const applying = await service.get(preflighted.id);
+        const applying = await service.get(proposal.projectId, preflighted.id);
         assert.equal(applying?.state, 'applying');
         assert.ok(applying?.pendingApply);
         assert.equal(
@@ -320,29 +374,12 @@ test('apply persists applying intent and journal before editor dispatch', async 
           request.requestId
         );
         assert.deepEqual(
-          (await service.getJournal(preflighted.id)).map(
+          (await service.getJournal(proposal.projectId, preflighted.id)).map(
             ({ toState }) => toState
           ),
           ['proposed', 'preflighted', 'applying']
         );
-        return {
-          schemaVersion: 1,
-          protocolVersion: 1,
-          requestId: request.requestId,
-          batchId: request.batchId,
-          success: true,
-          beforeSha256: proposal.baseContentSha256,
-          afterSha256: 'b'.repeat(64),
-          appliedChanges: [
-            {
-              transactionId: proposed.id,
-              from: proposal.target.from,
-              to: proposal.target.to,
-              oldText: proposal.expectedText,
-              newText: proposal.replacementText,
-            },
-          ],
-        };
+        return validReceipt(request, 'b'.repeat(64));
       }
     );
     assert.equal(dispatchStarted, true);
@@ -362,11 +399,13 @@ test('failed receipts, dispatcher exceptions, and invalid receipts end in stable
       idempotencyKey: 'failed-receipt',
     });
     const preflighted = await service.preflight(
+      proposal.projectId,
       proposed.id,
       proposed.revision,
       'b'.repeat(64)
     );
     const failedReceipt = await service.apply(
+      proposal.projectId,
       preflighted.id,
       preflighted.revision,
       async (request) => ({
@@ -384,17 +423,23 @@ test('failed receipts, dispatcher exceptions, and invalid receipts end in stable
     );
     assert.equal(failedReceipt.state, 'failed');
     assert.equal(failedReceipt.failure?.code, 'EXPECTED_TEXT_MISMATCH');
+    assert.equal(
+      failedReceipt.failure?.message,
+      FAILURE_MESSAGES.EXPECTED_TEXT_MISMATCH
+    );
 
     const invalidReceiptProposal = await service.propose({
       ...proposal,
       idempotencyKey: 'invalid-receipt',
     });
     const invalidPreflight = await service.preflight(
+      proposal.projectId,
       invalidReceiptProposal.id,
       invalidReceiptProposal.revision,
       'b'.repeat(64)
     );
     const invalidReceipt = await service.apply(
+      proposal.projectId,
       invalidPreflight.id,
       invalidPreflight.revision,
       async (request) => ({
@@ -415,11 +460,13 @@ test('failed receipts, dispatcher exceptions, and invalid receipts end in stable
       idempotencyKey: 'dispatch-exception',
     });
     const exceptionPreflight = await service.preflight(
+      proposal.projectId,
       exceptionProposal.id,
       exceptionProposal.revision,
       'b'.repeat(64)
     );
     const exceptionResult = await service.apply(
+      proposal.projectId,
       exceptionPreflight.id,
       exceptionPreflight.revision,
       async () => {
@@ -428,7 +475,10 @@ test('failed receipts, dispatcher exceptions, and invalid receipts end in stable
     );
     assert.equal(exceptionResult.state, 'failed');
     assert.equal(exceptionResult.failure?.code, 'APPLY_FAILED');
-    assert.match(exceptionResult.failure?.message ?? '', /bridge timeout/);
+    assert.equal(
+      exceptionResult.failure?.message,
+      FAILURE_MESSAGES.APPLY_FAILED
+    );
   } finally {
     await repository.deleteDatabase();
   }
@@ -456,7 +506,9 @@ test('concurrent identical proposals remain idempotent without unhandled rejecti
       [first.id]
     );
     assert.deepEqual(
-      (await service.getJournal(first.id)).map(({ toState }) => toState),
+      (await service.getJournal(proposal.projectId, first.id)).map(
+        ({ toState }) => toState
+      ),
       ['proposed']
     );
   } finally {
@@ -475,11 +527,13 @@ test('reconcile marks applying transactions failed when editor hash read fails',
       idempotencyKey: 'reconcile-read-failure',
     });
     const preflighted = await service.preflight(
+      proposal.projectId,
       proposed.id,
       proposed.revision,
       'b'.repeat(64)
     );
     const pendingApply = service.apply(
+      proposal.projectId,
       preflighted.id,
       preflighted.revision,
       () => new Promise(() => undefined)
@@ -491,7 +545,7 @@ test('reconcile marks applying transactions failed when editor hash read fails',
     });
     assert.equal(failed.state, 'failed');
     assert.equal(failed.failure?.code, 'RECOVERY_REQUIRED');
-    assert.match(failed.failure?.message ?? '', /EDITOR_UNAVAILABLE/);
+    assert.equal(failed.failure?.message, FAILURE_MESSAGES.RECOVERY_REQUIRED);
   } finally {
     await repository.deleteDatabase();
   }
@@ -516,26 +570,44 @@ test('runtime cancellation before dispatch leaves the transaction preflighted', 
       ...proposal,
       idempotencyKey: 'cancelled',
     });
-    const preflighted = await service.preflight(proposed.id, 0, 'b'.repeat(64));
-    await handler({
-      schemaVersion: 1,
-      protocolVersion: 1,
-      channel: 'iris:transaction-runtime',
-      requestId: 'cancel-command',
-      action: 'cancel',
-      payload: { targetRequestId: 'apply-command' },
-    });
-    const response = await handler({
-      schemaVersion: 1,
-      protocolVersion: 1,
-      channel: 'iris:transaction-runtime',
-      requestId: 'apply-command',
-      action: 'apply',
-      payload: { id: preflighted.id, expectedRevision: preflighted.revision },
-    });
+    const preflighted = await service.preflight(
+      proposal.projectId,
+      proposed.id,
+      0,
+      'b'.repeat(64)
+    );
+    await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'cancel-command',
+        action: 'cancel',
+        payload: { targetRequestId: 'apply-command' },
+      },
+      testHarnessContext
+    );
+    const response = await handler(
+      {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        channel: 'iris:transaction-runtime',
+        requestId: 'apply-command',
+        action: 'apply',
+        payload: {
+          projectId: proposal.projectId,
+          id: preflighted.id,
+          expectedRevision: preflighted.revision,
+        },
+      },
+      testHarnessContext
+    );
     assert.equal(response.error?.code, 'CANCELLED_BEFORE_DISPATCH');
     assert.equal(dispatchCount, 0);
-    assert.equal((await service.get(preflighted.id))?.state, 'preflighted');
+    assert.equal(
+      (await service.get(proposal.projectId, preflighted.id))?.state,
+      'preflighted'
+    );
   } finally {
     await repository.deleteDatabase();
   }

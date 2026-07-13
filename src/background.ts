@@ -5,7 +5,9 @@ import type {
   ApplyEditBatchReceiptV1,
   ApplyEditBatchRequestV1,
   EditTransactionV1,
+  TransactionRuntimeContext,
   TransactionRuntimeRequestV1,
+  TransactionRuntimeResponseV1,
 } from './transactions/contracts';
 import { IndexedDbTransactionRepository } from './transactions/indexedDbRepository';
 import { createTransactionRuntimeHandler } from './transactions/runtime';
@@ -37,6 +39,33 @@ async function sendToActiveOverleafTab<T>(message: unknown): Promise<T> {
       resolve(response);
     });
   });
+}
+
+const OVERLEAF_PROJECT_URL =
+  /^https:\/\/www\.overleaf\.com\/project\/([^/?#]+)/;
+
+function projectIdFromTabUrl(url?: string): string | null {
+  const match = url?.match(OVERLEAF_PROJECT_URL);
+  return match?.[1] ?? null;
+}
+
+function isExtensionHarnessUrl(url?: string): boolean {
+  return Boolean(url?.startsWith(chrome.runtime.getURL('browser-test-harness.html')));
+}
+
+function rejectedRuntimeResponse(
+  requestId: string,
+  code: 'WRONG_PROJECT' | 'INVALID_REQUEST',
+  message: string
+): TransactionRuntimeResponseV1 {
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    channel: 'iris:transaction-runtime',
+    requestId,
+    ok: false,
+    error: { code, message },
+  };
 }
 
 const handleTransactionRequest = createTransactionRuntimeHandler({
@@ -109,11 +138,52 @@ function ensureNativePort(): chrome.runtime.Port | null {
   return nativePort;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'iris:transaction-runtime-test') {
+    if (!isExtensionHarnessUrl(sender.url)) {
+      sendResponse(
+        rejectedRuntimeResponse(
+          typeof message.request?.requestId === 'string'
+            ? message.request.requestId
+            : 'rejected',
+          'INVALID_REQUEST',
+          'Unsupported runtime source'
+        )
+      );
+      return true;
+    }
+    const context: TransactionRuntimeContext = {
+      boundProjectId: null,
+      source: 'test-harness',
+    };
+    void handleTransactionRequest(
+      message.request as TransactionRuntimeRequestV1,
+      context
+    ).then(sendResponse);
+    return true;
+  }
   if (message?.type === 'iris:transaction-runtime') {
-    void handleTransactionRequest(message.request as TransactionRuntimeRequestV1).then(
-      sendResponse
-    );
+    const boundProjectId = projectIdFromTabUrl(sender.tab?.url);
+    if (!boundProjectId) {
+      sendResponse(
+        rejectedRuntimeResponse(
+          typeof message.request?.requestId === 'string'
+            ? message.request.requestId
+            : 'rejected',
+          'WRONG_PROJECT',
+          'Active tab is not an Overleaf project'
+        )
+      );
+      return true;
+    }
+    const context: TransactionRuntimeContext = {
+      boundProjectId,
+      source: 'content-script',
+    };
+    void handleTransactionRequest(
+      message.request as TransactionRuntimeRequestV1,
+      context
+    ).then(sendResponse);
     return true;
   }
   if (message?.type === 'ageaf:native-request') {

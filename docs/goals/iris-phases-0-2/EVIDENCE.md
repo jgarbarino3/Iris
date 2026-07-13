@@ -148,6 +148,17 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - Deterministic Playwright browser gate: 2 passed. The new `test/browser/transaction-runtime.spec.ts` uses the extension `browser-test-harness.html` page to send runtime RPCs and proves proposal/list round-trips plus extension-origin IndexedDB persistence with redacted provenance.
 - P2-01 changed transaction infrastructure only; panel/editor writers remain untouched pending P2-02 cutover.
 
+### P2-01 hardening — project scope, receipt validation, and sanitized failures
+
+- Project-scoped every mutating/read path: `get`, `preflight`, `apply`, `reject`, `retry`, and `reconcile` now require `projectId`, reject `WRONG_PROJECT` on mismatch, and bind content-script runtime calls to the active Overleaf tab project derived from `sender.tab.url`.
+- Added a separate `iris:transaction-runtime-test` route limited to `browser-test-harness.html`; production content-script checks remain unchanged.
+- Replaced global idempotency with project-scoped composite keys and proposal fingerprints; IndexedDB schema version 2 migrates legacy transactions/journals into `idempotency_v2` without deleting history.
+- Added strict receipt parsing/validation and persist only reconstructed allowlisted receipt objects; raw editor responses and secret-bearing nested fields never reach durable storage.
+- Durable failures now use stable codes and bounded generic messages only; dispatcher, browser, and reconciliation exceptions are redacted before persistence.
+- Focused hardening tests: 8 passed, covering cross-project denial, sender-tab binding, cross-project idempotency, same-project key/content mismatch, v1→v2 migration, valid receipt acceptance, invalid receipt membership/hash/text/range cases, and sentinel redaction.
+- Root `npm test`: 392 CommonJS + 18 transaction TypeScript tests passed (410 total).
+- Deterministic Playwright browser gate: 2 passed, including extension-harness RPC persistence, IndexedDB schema version 2, and cross-project `WRONG_PROJECT` denial.
+
 ## Final acceptance
 
 Pending full root/host verification, deterministic browser suite, displaced-path audit, private Overleaf smoke, correctness review, maintainability review, and final diff review.

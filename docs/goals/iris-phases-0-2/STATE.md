@@ -33,7 +33,7 @@
 - Insertion test truth is reconciled around actionable `insertAtCursor` review cards; copy-only fallback is explicitly rejected.
 - Production dependency-audit reachability is recorded in `EVIDENCE.md`; no broad dependency upgrade was mixed into the baseline slice.
 - Existing unrelated host/tooling changes remain preserved and were not rewritten by P1-01 or P1-02.
-- P2-01 is verified: versioned transaction/batch/error contracts, allowlisted provenance sanitization, runtime payload parsing, and the background-owned `iris-edit-transactions` IndexedDB store with compare-and-swap transitions, journal events, idempotent proposals, restart reconciliation, and pre-dispatch apply intent now live behind the `iris:transaction-runtime` channel. No editor writer was cut over yet.
+- P2-01 is verified: versioned transaction/batch/error contracts, allowlisted provenance sanitization, runtime payload parsing, project-scoped operations and idempotency, strict receipt validation, sanitized durable failures, and the background-owned `iris-edit-transactions` IndexedDB store (schema version 2) with compare-and-swap transitions, journal events, idempotent proposals, restart reconciliation, and pre-dispatch apply intent now live behind the `iris:transaction-runtime` channel. Content-script callers bind to the active Overleaf tab project; the extension test harness uses a separate `iris:transaction-runtime-test` route. No editor writer was cut over yet.
 
 ## Next gate
 

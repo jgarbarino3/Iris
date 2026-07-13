@@ -3,16 +3,24 @@ import type {
   ListTransactionsV1,
   TransactionJournalEventV1,
 } from './contracts';
-import { TransactionError } from './contracts';
+import {
+  TRANSACTION_DATABASE_VERSION,
+  TransactionError,
+  composeIdempotencyKey,
+  proposalFingerprintFromTransaction,
+} from './contracts';
 
 const DEFAULT_DATABASE_NAME = 'iris-edit-transactions';
-const DATABASE_VERSION = 1;
 const TRANSACTIONS_STORE = 'transactions';
 const JOURNAL_STORE = 'journal';
-const IDEMPOTENCY_STORE = 'idempotency';
+const IDEMPOTENCY_STORE = 'idempotency_v2';
+const LEGACY_IDEMPOTENCY_STORE = 'idempotency';
 
 type IdempotencyRecord = {
   key: string;
+  projectId: string;
+  idempotencyKey: string;
+  proposalFingerprint: string;
   transactionId: string;
 };
 
@@ -37,6 +45,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 export class IndexedDbTransactionRepository {
   private readonly databaseName: string;
   private databasePromise: Promise<IDBDatabase> | null = null;
+  private idempotencyMigrated = false;
 
   constructor(options: { databaseName?: string } = {}) {
     this.databaseName = options.databaseName ?? DEFAULT_DATABASE_NAME;
@@ -45,9 +54,13 @@ export class IndexedDbTransactionRepository {
   private open(): Promise<IDBDatabase> {
     if (this.databasePromise) return this.databasePromise;
     this.databasePromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.databaseName, DATABASE_VERSION);
-      request.onupgradeneeded = () => {
+      const request = indexedDB.open(
+        this.databaseName,
+        TRANSACTION_DATABASE_VERSION
+      );
+      request.onupgradeneeded = (event) => {
         const database = request.result;
+
         if (!database.objectStoreNames.contains(TRANSACTIONS_STORE)) {
           const store = database.createObjectStore(TRANSACTIONS_STORE, {
             keyPath: 'id',
@@ -67,10 +80,20 @@ export class IndexedDbTransactionRepository {
           store.createIndex('timestamp', 'timestamp', { unique: false });
         }
         if (!database.objectStoreNames.contains(IDEMPOTENCY_STORE)) {
-          database.createObjectStore(IDEMPOTENCY_STORE, { keyPath: 'key' });
+          const store = database.createObjectStore(IDEMPOTENCY_STORE, {
+            keyPath: 'key',
+          });
+          store.createIndex('projectId', 'projectId', { unique: false });
+        }
+        if (event.oldVersion > 0 && event.oldVersion < 2) {
+          this.idempotencyMigrated = false;
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        void this.ensureIdempotencyMigrated(request.result)
+          .then(() => resolve(request.result))
+          .catch(reject);
+      };
       request.onerror = () => {
         this.databasePromise = null;
         reject(
@@ -85,37 +108,97 @@ export class IndexedDbTransactionRepository {
     return this.databasePromise;
   }
 
-  private async getByIdempotencyKey(
-    key: string
-  ): Promise<EditTransactionV1 | null> {
-    const database = await this.open();
-    const idbTransaction = database.transaction(
-      [TRANSACTIONS_STORE, IDEMPOTENCY_STORE],
+  private async ensureIdempotencyMigrated(
+    database: IDBDatabase
+  ): Promise<void> {
+    if (this.idempotencyMigrated) return;
+
+    const readTransaction = database.transaction(
+      [IDEMPOTENCY_STORE, TRANSACTIONS_STORE],
       'readonly'
     );
-    const idempotency = idbTransaction.objectStore(IDEMPOTENCY_STORE);
-    const transactions = idbTransaction.objectStore(TRANSACTIONS_STORE);
-    const existing = await requestResult(
-      idempotency.get(key) as IDBRequest<IdempotencyRecord | undefined>
+    const idempotencyCount = await requestResult(
+      readTransaction.objectStore(IDEMPOTENCY_STORE).count()
     );
-    if (!existing) {
-      await transactionDone(idbTransaction);
-      return null;
+    const transactions = await requestResult(
+      readTransaction.objectStore(TRANSACTIONS_STORE).getAll() as IDBRequest<
+        EditTransactionV1[]
+      >
+    );
+    await transactionDone(readTransaction);
+
+    if (idempotencyCount > 0 || transactions.length === 0) {
+      this.idempotencyMigrated = true;
+      return;
     }
+
+    const writeTransaction = database.transaction(
+      [IDEMPOTENCY_STORE],
+      'readwrite'
+    );
+    const idempotency = writeTransaction.objectStore(IDEMPOTENCY_STORE);
+    for (const transaction of transactions) {
+      idempotency.add({
+        key: composeIdempotencyKey(
+          transaction.projectId,
+          transaction.idempotencyKey
+        ),
+        projectId: transaction.projectId,
+        idempotencyKey: transaction.idempotencyKey,
+        proposalFingerprint: proposalFingerprintFromTransaction(transaction),
+        transactionId: transaction.id,
+      } as IdempotencyRecord);
+    }
+    await transactionDone(writeTransaction);
+    this.idempotencyMigrated = true;
+  }
+
+  private async getIdempotencyRecord(
+    key: string
+  ): Promise<IdempotencyRecord | null> {
+    const database = await this.open();
+    const idbTransaction = database.transaction(IDEMPOTENCY_STORE, 'readonly');
     const value = await requestResult(
-      transactions.get(existing.transactionId) as IDBRequest<
-        EditTransactionV1 | undefined
+      idbTransaction.objectStore(IDEMPOTENCY_STORE).get(key) as IDBRequest<
+        IdempotencyRecord | undefined
       >
     );
     await transactionDone(idbTransaction);
     return value ?? null;
   }
 
+  private async getByIdempotencyKey(
+    projectId: string,
+    idempotencyKey: string,
+    proposalFingerprint: string
+  ): Promise<EditTransactionV1 | null> {
+    const record = await this.getIdempotencyRecord(
+      composeIdempotencyKey(projectId, idempotencyKey)
+    );
+    if (!record) return null;
+    if (record.proposalFingerprint !== proposalFingerprint) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Idempotency key reused with different proposal content'
+      );
+    }
+    return this.get(record.transactionId);
+  }
+
   async createOrGet(
     transaction: EditTransactionV1,
-    event: TransactionJournalEventV1
+    event: TransactionJournalEventV1,
+    proposalFingerprint: string
   ): Promise<EditTransactionV1> {
-    const raced = await this.getByIdempotencyKey(transaction.idempotencyKey);
+    const compositeKey = composeIdempotencyKey(
+      transaction.projectId,
+      transaction.idempotencyKey
+    );
+    const raced = await this.getByIdempotencyKey(
+      transaction.projectId,
+      transaction.idempotencyKey,
+      proposalFingerprint
+    );
     if (raced) return raced;
 
     const database = await this.open();
@@ -127,11 +210,18 @@ export class IndexedDbTransactionRepository {
     const transactions = idbTransaction.objectStore(TRANSACTIONS_STORE);
     try {
       const existing = await requestResult(
-        idempotency.get(transaction.idempotencyKey) as IDBRequest<
+        idempotency.get(compositeKey) as IDBRequest<
           IdempotencyRecord | undefined
         >
       );
       if (existing) {
+        if (existing.proposalFingerprint !== proposalFingerprint) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'INVALID_REQUEST',
+            'Idempotency key reused with different proposal content'
+          );
+        }
         const value = await requestResult(
           transactions.get(existing.transactionId) as IDBRequest<
             EditTransactionV1 | undefined
@@ -148,7 +238,10 @@ export class IndexedDbTransactionRepository {
       transactions.add(transaction);
       idbTransaction.objectStore(JOURNAL_STORE).add(event);
       idempotency.add({
-        key: transaction.idempotencyKey,
+        key: compositeKey,
+        projectId: transaction.projectId,
+        idempotencyKey: transaction.idempotencyKey,
+        proposalFingerprint,
         transactionId: transaction.id,
       } as IdempotencyRecord);
       await transactionDone(idbTransaction);
@@ -159,8 +252,16 @@ export class IndexedDbTransactionRepository {
       } catch {
         // The write transaction may already be aborted after a constraint race.
       }
+      if (
+        error instanceof TransactionError &&
+        error.code === 'INVALID_REQUEST'
+      ) {
+        throw error;
+      }
       const recovered = await this.getByIdempotencyKey(
-        transaction.idempotencyKey
+        transaction.projectId,
+        transaction.idempotencyKey,
+        proposalFingerprint
       );
       if (recovered) return recovered;
       throw error;
@@ -259,6 +360,7 @@ export class IndexedDbTransactionRepository {
       database.close();
       this.databasePromise = null;
     }
+    this.idempotencyMigrated = false;
     await requestResult(indexedDB.deleteDatabase(this.databaseName));
   }
 }

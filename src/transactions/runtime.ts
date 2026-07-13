@@ -1,10 +1,15 @@
 import {
   TransactionError,
+  enforceRuntimeProjectScope,
   parseListPayload,
+  parsePreflightPayload,
+  parseProjectScopedIdPayload,
   parseProposePayload,
+  parseRevisionScopedPayload,
   type ApplyEditBatchReceiptV1,
   type ApplyEditBatchRequestV1,
   type EditTransactionV1,
+  type TransactionRuntimeContext,
   type TransactionRuntimeRequestV1,
   type TransactionRuntimeResponseV1,
 } from './contracts';
@@ -33,21 +38,14 @@ function stringField(payload: Record<string, unknown>, key: string): string {
   return value;
 }
 
-function revisionField(payload: Record<string, unknown>): number {
-  const value = payload.expectedRevision;
-  if (!Number.isInteger(value) || (value as number) < 0) {
-    throw new TransactionError('INVALID_REQUEST', 'Invalid expectedRevision');
-  }
-  return value as number;
-}
-
 export function createTransactionRuntimeHandler(
   dependencies: TransactionRuntimeDependencies
 ): (
-  request: TransactionRuntimeRequestV1
+  request: TransactionRuntimeRequestV1,
+  context: TransactionRuntimeContext
 ) => Promise<TransactionRuntimeResponseV1> {
   const cancelledRequestIds = new Set<string>();
-  return async (request) => {
+  return async (request, context) => {
     const response = (
       value: Omit<
         TransactionRuntimeResponseV1,
@@ -79,51 +77,75 @@ export function createTransactionRuntimeHandler(
           cancelledRequestIds.add(stringField(payload, 'targetRequestId'));
           result = { cancelledBeforeDispatch: true };
           break;
-        case 'propose':
-          result = await dependencies.service.propose(
-            parseProposePayload(payload)
-          );
+        case 'propose': {
+          const proposal = parseProposePayload(payload);
+          enforceRuntimeProjectScope(proposal.projectId, context);
+          result = await dependencies.service.propose(proposal);
           break;
-        case 'get':
-          result = await dependencies.service.get(stringField(payload, 'id'));
+        }
+        case 'get': {
+          const scoped = parseProjectScopedIdPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.get(scoped.projectId, scoped.id);
           break;
-        case 'list':
-          result = await dependencies.service.list(parseListPayload(payload));
+        }
+        case 'list': {
+          const query = parseListPayload(payload);
+          enforceRuntimeProjectScope(query.projectId, context);
+          result = await dependencies.service.list(query);
           break;
-        case 'preflight':
+        }
+        case 'preflight': {
+          const scoped = parsePreflightPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
           result = await dependencies.service.preflight(
-            stringField(payload, 'id'),
-            revisionField(payload),
-            stringField(payload, 'expectedPostApplySha256')
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            scoped.expectedPostApplySha256
           );
           break;
-        case 'apply':
+        }
+        case 'apply': {
           if (cancelledRequestIds.delete(request.requestId)) {
             throw new TransactionError(
               'CANCELLED_BEFORE_DISPATCH',
               'Apply was cancelled before editor dispatch'
             );
           }
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
           result = await dependencies.service.apply(
-            stringField(payload, 'id'),
-            revisionField(payload),
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
             dependencies.dispatchApply
           );
           break;
-        case 'reject':
+        }
+        case 'reject': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
           result = await dependencies.service.reject(
-            stringField(payload, 'id'),
-            revisionField(payload)
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision
           );
           break;
-        case 'retry':
+        }
+        case 'retry': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
           result = await dependencies.service.retry(
-            stringField(payload, 'id'),
-            revisionField(payload)
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision
           );
           break;
+        }
         case 'reconcile': {
           const projectId = stringField(payload, 'projectId');
+          enforceRuntimeProjectScope(projectId, context);
           result = await dependencies.service.reconcile(
             projectId,
             dependencies.readFileSha256
@@ -143,9 +165,7 @@ export function createTransactionRuntimeHandler(
           ? error
           : new TransactionError(
               'INVALID_REQUEST',
-              error instanceof Error
-                ? error.message
-                : 'Transaction request failed'
+              'Transaction request failed'
             );
       return response({
         ok: false,

@@ -1,5 +1,11 @@
 export const TRANSACTION_SCHEMA_VERSION = 1 as const;
 export const TRANSACTION_PROTOCOL_VERSION = 1 as const;
+export const TRANSACTION_DATABASE_VERSION = 2 as const;
+
+export type TransactionRuntimeContext = {
+  boundProjectId: string | null;
+  source: 'content-script' | 'test-harness';
+};
 
 export const TRANSACTION_ERROR_CODES = [
   'PROTOCOL_MISMATCH',
@@ -19,6 +25,23 @@ export const TRANSACTION_ERROR_CODES = [
 ] as const;
 
 export type TransactionErrorCode = (typeof TRANSACTION_ERROR_CODES)[number];
+
+export const FAILURE_MESSAGES: Record<TransactionErrorCode, string> = {
+  PROTOCOL_MISMATCH: 'Unsupported transaction protocol',
+  INVALID_REQUEST: 'Invalid transaction request',
+  WRONG_PROJECT: 'Project does not match the active Overleaf project',
+  WRONG_FILE: 'Target file does not match',
+  EDITOR_UNAVAILABLE: 'Editor is unavailable',
+  STALE_HASH: 'Document hash is stale',
+  EXPECTED_TEXT_MISMATCH: 'Expected text does not match the document',
+  AMBIGUOUS_ANCHOR: 'Anchor match is ambiguous',
+  OVERLAPPING_CHANGES: 'Batch changes overlap',
+  APPLY_TIMEOUT: 'Editor apply timed out',
+  APPLY_FAILED: 'Editor apply failed',
+  CANCELLED_BEFORE_DISPATCH: 'Apply was cancelled before editor dispatch',
+  STALE_REVISION: 'Transaction revision is stale',
+  RECOVERY_REQUIRED: 'Manual recovery is required',
+};
 export type EditTransactionState =
   | 'proposed'
   | 'preflighted'
@@ -256,6 +279,236 @@ export function boundedAnchor(value: string): string {
 
 export function boundedSuffix(value: string): string {
   return value.length <= 256 ? value : value.slice(0, 256);
+}
+
+export function composeIdempotencyKey(
+  projectId: string,
+  idempotencyKey: string
+): string {
+  return `${projectId}\u001e${idempotencyKey}`;
+}
+
+export function proposalFingerprint(input: ProposeEditTransactionV1): string {
+  const normalized = {
+    projectId: input.projectId,
+    intent: input.intent,
+    target: {
+      filePath: input.target.filePath,
+      ...(input.target.fileId ? { fileId: input.target.fileId } : {}),
+      from: input.target.from,
+      to: input.target.to,
+    },
+    expectedText: input.expectedText,
+    replacementText: input.replacementText,
+    prefix: boundedAnchor(input.prefix),
+    suffix: boundedSuffix(input.suffix),
+    baseContentSha256: input.baseContentSha256.toLowerCase(),
+    proposalOrder: input.proposalOrder ?? 0,
+  };
+  return JSON.stringify(normalized);
+}
+
+export function proposalFingerprintFromTransaction(
+  transaction: EditTransactionV1
+): string {
+  return proposalFingerprint({
+    idempotencyKey: transaction.idempotencyKey,
+    projectId: transaction.projectId,
+    intent: transaction.intent,
+    target: transaction.target,
+    expectedText: transaction.expectedText,
+    replacementText: transaction.replacementText,
+    prefix: transaction.prefix,
+    suffix: transaction.suffix,
+    baseContentSha256: transaction.baseContentSha256,
+    proposalOrder: transaction.proposalOrder,
+  });
+}
+
+export function sanitizeFailure(
+  code: TransactionErrorCode,
+  at: number
+): TransactionFailureV1 {
+  return {
+    code,
+    message: FAILURE_MESSAGES[code],
+    at,
+  };
+}
+
+export function sanitizeFailureCode(value: unknown): TransactionErrorCode {
+  if (
+    typeof value === 'string' &&
+    TRANSACTION_ERROR_CODES.includes(value as TransactionErrorCode)
+  ) {
+    return value as TransactionErrorCode;
+  }
+  return 'APPLY_FAILED';
+}
+
+export function parseAndValidateSuccessReceipt(
+  raw: unknown,
+  request: ApplyEditBatchRequestV1,
+  transaction: EditTransactionV1,
+  expectedAfterSha256: string
+): ApplyEditBatchReceiptV1 {
+  const source = requireObject(raw);
+  if (source.schemaVersion !== 1 || source.protocolVersion !== 1) {
+    throw new TransactionError('INVALID_REQUEST', 'Invalid receipt protocol');
+  }
+  if (source.success !== true) {
+    throw new TransactionError('APPLY_FAILED', 'Receipt reported failure');
+  }
+  if (
+    source.requestId !== request.requestId ||
+    source.batchId !== request.batchId
+  ) {
+    throw new TransactionError('APPLY_FAILED', 'Receipt identity mismatch');
+  }
+  const beforeSha256 =
+    typeof source.beforeSha256 === 'string'
+      ? source.beforeSha256.toLowerCase()
+      : '';
+  const afterSha256 =
+    typeof source.afterSha256 === 'string'
+      ? source.afterSha256.toLowerCase()
+      : '';
+  if (
+    !isSha256(beforeSha256) ||
+    beforeSha256 !== request.expectedBaseSha256.toLowerCase()
+  ) {
+    throw new TransactionError('APPLY_FAILED', 'Receipt before hash mismatch');
+  }
+  if (
+    !isSha256(afterSha256) ||
+    afterSha256 !== expectedAfterSha256.toLowerCase()
+  ) {
+    throw new TransactionError('APPLY_FAILED', 'Receipt after hash mismatch');
+  }
+  if (!Array.isArray(source.appliedChanges)) {
+    throw new TransactionError('APPLY_FAILED', 'Receipt changes missing');
+  }
+  if (source.appliedChanges.length !== request.changes.length) {
+    throw new TransactionError(
+      'APPLY_FAILED',
+      'Receipt change membership mismatch'
+    );
+  }
+  const appliedChanges: AppliedChangeReceiptV1[] = [];
+  for (let index = 0; index < request.changes.length; index += 1) {
+    const expectedChange = request.changes[index];
+    const actualChange = source.appliedChanges[index];
+    if (!actualChange || typeof actualChange !== 'object') {
+      throw new TransactionError('APPLY_FAILED', 'Receipt change invalid');
+    }
+    const change = actualChange as Record<string, unknown>;
+    const transactionId = change.transactionId;
+    const from = change.from;
+    const to = change.to;
+    const oldText = change.oldText;
+    const newText = change.newText;
+    if (
+      transactionId !== expectedChange.transactionId ||
+      transactionId !== transaction.id ||
+      from !== expectedChange.from ||
+      to !== expectedChange.to ||
+      oldText !== expectedChange.expectedText ||
+      newText !== expectedChange.replacementText
+    ) {
+      throw new TransactionError('APPLY_FAILED', 'Receipt change mismatch');
+    }
+    appliedChanges.push({
+      transactionId: expectedChange.transactionId,
+      from: expectedChange.from,
+      to: expectedChange.to,
+      oldText: expectedChange.expectedText,
+      newText: expectedChange.replacementText,
+    });
+  }
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    requestId: request.requestId,
+    batchId: request.batchId,
+    success: true,
+    beforeSha256,
+    afterSha256,
+    appliedChanges,
+  };
+}
+
+export function parseFailedReceiptFailure(
+  raw: unknown,
+  at: number
+): TransactionFailureV1 {
+  const source = requireObject(raw);
+  if (source.success !== false) {
+    return sanitizeFailure('APPLY_FAILED', at);
+  }
+  const error =
+    source.error && typeof source.error === 'object'
+      ? (source.error as Record<string, unknown>)
+      : null;
+  return sanitizeFailure(sanitizeFailureCode(error?.code), at);
+}
+
+export function parseProjectScopedIdPayload(payload: unknown): {
+  projectId: string;
+  id: string;
+} {
+  const source = requireObject(payload);
+  return {
+    projectId: requireString(source, 'projectId'),
+    id: requireString(source, 'id'),
+  };
+}
+
+export function parsePreflightPayload(payload: unknown): {
+  projectId: string;
+  id: string;
+  expectedRevision: number;
+  expectedPostApplySha256: string;
+} {
+  const source = requireObject(payload);
+  const expectedRevision = source.expectedRevision;
+  if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) {
+    throw new TransactionError('INVALID_REQUEST', 'Invalid expectedRevision');
+  }
+  return {
+    projectId: requireString(source, 'projectId'),
+    id: requireString(source, 'id'),
+    expectedRevision: expectedRevision as number,
+    expectedPostApplySha256: requireString(source, 'expectedPostApplySha256'),
+  };
+}
+
+export function parseRevisionScopedPayload(payload: unknown): {
+  projectId: string;
+  id: string;
+  expectedRevision: number;
+} {
+  const source = requireObject(payload);
+  const expectedRevision = source.expectedRevision;
+  if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) {
+    throw new TransactionError('INVALID_REQUEST', 'Invalid expectedRevision');
+  }
+  return {
+    projectId: requireString(source, 'projectId'),
+    id: requireString(source, 'id'),
+    expectedRevision: expectedRevision as number,
+  };
+}
+
+export function enforceRuntimeProjectScope(
+  projectId: string,
+  context: TransactionRuntimeContext
+): void {
+  if (
+    context.source === 'content-script' &&
+    (!context.boundProjectId || projectId !== context.boundProjectId)
+  ) {
+    throw new TransactionError('WRONG_PROJECT', FAILURE_MESSAGES.WRONG_PROJECT);
+  }
 }
 
 function requireObject(payload: unknown): Record<string, unknown> {

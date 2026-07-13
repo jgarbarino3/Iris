@@ -1,5 +1,7 @@
 import { expect, test } from './fixtures';
 
+const TRANSACTION_DATABASE_VERSION = 2;
+
 test('background transaction runtime persists proposals in extension IndexedDB', async ({
   context,
 }) => {
@@ -55,7 +57,7 @@ test('background transaction runtime persists proposals in extension IndexedDB',
         error?: { code: string; message: string };
       }>((resolve) => {
         chrome.runtime.sendMessage(
-          { type: 'iris:transaction-runtime', request: proposeRequest },
+          { type: 'iris:transaction-runtime-test', request: proposeRequest },
           resolve
         );
       });
@@ -66,7 +68,7 @@ test('background transaction runtime persists proposals in extension IndexedDB',
       }>((resolve) => {
         chrome.runtime.sendMessage(
           {
-            type: 'iris:transaction-runtime',
+            type: 'iris:transaction-runtime-test',
             request: {
               schemaVersion: 1,
               protocolVersion: 1,
@@ -80,52 +82,94 @@ test('background transaction runtime persists proposals in extension IndexedDB',
         );
       });
 
+      const crossProjectGet = await new Promise<{
+        ok: boolean;
+        result?: unknown;
+        error?: { code: string };
+      }>((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            type: 'iris:transaction-runtime-test',
+            request: {
+              schemaVersion: 1,
+              protocolVersion: 1,
+              channel: 'iris:transaction-runtime',
+              requestId: 'browser-get-wrong-project',
+              action: 'get',
+              payload: {
+                projectId: 'other-project',
+                id: proposeResponse?.result?.id ?? 'missing',
+              },
+            },
+          },
+          resolve
+        );
+      });
+
       return {
         proposeResponse,
         listResponse,
-        serialized: JSON.stringify({ proposeResponse, listResponse }),
+        crossProjectGet,
+        serialized: JSON.stringify({
+          proposeResponse,
+          listResponse,
+          crossProjectGet,
+        }),
       };
     },
     { key: idempotencyKey, project: projectId }
   );
 
-  const storageResult = await serviceWorker.evaluate(async () => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const openRequest = indexedDB.open('iris-edit-transactions', 1);
-      openRequest.onsuccess = () => resolve(openRequest.result);
-      openRequest.onerror = () => reject(openRequest.error);
-    });
+  const storageResult = await serviceWorker.evaluate(
+    async (expectedVersion) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const openRequest = indexedDB.open('iris-edit-transactions');
+        openRequest.onsuccess = () => resolve(openRequest.result);
+        openRequest.onerror = () => reject(openRequest.error);
+      });
 
-    const transactions = await new Promise<
-      Array<{ id: string; state: string; provenance?: Record<string, unknown> }>
-    >((resolve, reject) => {
-      const transaction = database.transaction('transactions', 'readonly');
-      const store = transaction.objectStore('transactions');
-      const readRequest = store.getAll();
-      readRequest.onsuccess = () => resolve(readRequest.result);
-      readRequest.onerror = () => reject(readRequest.error);
-    });
-
-    const journal = await new Promise<Array<{ toState: string }>>(
-      (resolve, reject) => {
-        const transaction = database.transaction('journal', 'readonly');
-        const store = transaction.objectStore('journal');
+      const transactions = await new Promise<
+        Array<{
+          id: string;
+          state: string;
+          provenance?: Record<string, unknown>;
+        }>
+      >((resolve, reject) => {
+        const transaction = database.transaction('transactions', 'readonly');
+        const store = transaction.objectStore('transactions');
         const readRequest = store.getAll();
         readRequest.onsuccess = () => resolve(readRequest.result);
         readRequest.onerror = () => reject(readRequest.error);
-      }
-    );
+      });
 
-    database.close();
+      const journal = await new Promise<Array<{ toState: string }>>(
+        (resolve, reject) => {
+          const transaction = database.transaction('journal', 'readonly');
+          const store = transaction.objectStore('journal');
+          const readRequest = store.getAll();
+          readRequest.onsuccess = () => resolve(readRequest.result);
+          readRequest.onerror = () => reject(readRequest.error);
+        }
+      );
 
-    return { transactions, journal };
-  });
+      database.close();
+
+      return {
+        version: database.version,
+        transactions,
+        journal,
+      };
+    },
+    TRANSACTION_DATABASE_VERSION
+  );
 
   expect(rpcResult.proposeResponse?.ok).toBe(true);
   expect(rpcResult.proposeResponse?.result?.state).toBe('proposed');
   expect(rpcResult.listResponse?.ok).toBe(true);
   expect(rpcResult.listResponse?.result).toHaveLength(1);
-  expect(rpcResult.listResponse?.result?.[0]?.state).toBe('proposed');
+  expect(rpcResult.crossProjectGet?.ok).toBe(false);
+  expect(rpcResult.crossProjectGet?.error?.code).toBe('WRONG_PROJECT');
+  expect(storageResult.version).toBe(TRANSACTION_DATABASE_VERSION);
   expect(storageResult.transactions).toHaveLength(1);
   expect(storageResult.transactions[0]?.state).toBe('proposed');
   expect(storageResult.transactions[0]?.provenance).toEqual({

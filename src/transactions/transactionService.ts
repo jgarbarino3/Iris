@@ -2,6 +2,10 @@ import {
   assertProposal,
   boundedAnchor,
   boundedSuffix,
+  parseAndValidateSuccessReceipt,
+  parseFailedReceiptFailure,
+  proposalFingerprint,
+  sanitizeFailure,
   type EditTransactionV1,
   type ApplyEditBatchRequestV1,
   type ApplyEditBatchReceiptV1,
@@ -37,6 +41,7 @@ export class TransactionService {
     assertProposal(input);
     const timestamp = this.now();
     const provenance = sanitizeProvenance(input.provenance);
+    const fingerprint = proposalFingerprint(input);
     const transaction: EditTransactionV1 = {
       schemaVersion: 1,
       id: this.createId(),
@@ -75,22 +80,30 @@ export class TransactionService {
       toState: 'proposed',
       timestamp,
     };
-    return this.repository.createOrGet(transaction, event);
+    return this.repository.createOrGet(transaction, event, fingerprint);
   }
 
-  get(id: string): Promise<EditTransactionV1 | null> {
-    return this.repository.get(id);
+  async get(projectId: string, id: string): Promise<EditTransactionV1 | null> {
+    const transaction = await this.repository.get(id);
+    if (!transaction) return null;
+    this.assertProjectScope(transaction, projectId);
+    return transaction;
   }
 
   list(query: ListTransactionsV1): Promise<EditTransactionV1[]> {
     return this.repository.list(query);
   }
 
-  getJournal(transactionId: string): Promise<TransactionJournalEventV1[]> {
-    return this.repository.getJournal(transactionId);
+  async getJournal(
+    projectId: string,
+    transactionId: string
+  ): Promise<TransactionJournalEventV1[]> {
+    const transaction = await this.requireTransaction(projectId, transactionId);
+    return this.repository.getJournal(transaction.id);
   }
 
   preflight(
+    projectId: string,
     id: string,
     expectedRevision: number,
     expectedPostApplySha256: string
@@ -101,38 +114,42 @@ export class TransactionService {
         'Invalid post-apply SHA-256'
       );
     }
-    return this.transition(id, expectedRevision, 'preflighted', {
+    return this.transition(projectId, id, expectedRevision, 'preflighted', {
       expectedPostApplySha256: expectedPostApplySha256.toLowerCase(),
       failure: undefined,
     });
   }
 
-  reject(id: string, expectedRevision: number): Promise<EditTransactionV1> {
-    return this.transition(id, expectedRevision, 'rejected', {
+  reject(
+    projectId: string,
+    id: string,
+    expectedRevision: number
+  ): Promise<EditTransactionV1> {
+    return this.transition(projectId, id, expectedRevision, 'rejected', {
       rejectedAt: this.now(),
     });
   }
 
-  retry(id: string, expectedRevision: number): Promise<EditTransactionV1> {
-    return this.transition(id, expectedRevision, 'preflighted', {
+  retry(
+    projectId: string,
+    id: string,
+    expectedRevision: number
+  ): Promise<EditTransactionV1> {
+    return this.transition(projectId, id, expectedRevision, 'preflighted', {
       failure: undefined,
       failedAt: undefined,
     });
   }
 
   async apply(
+    projectId: string,
     id: string,
     expectedRevision: number,
     dispatch: (
       request: ApplyEditBatchRequestV1
     ) => Promise<ApplyEditBatchReceiptV1>
   ): Promise<EditTransactionV1> {
-    const current = await this.repository.get(id);
-    if (!current)
-      throw new TransactionError(
-        'INVALID_REQUEST',
-        `Unknown transaction ${id}`
-      );
+    const current = await this.requireTransaction(projectId, id);
     if (current.revision !== expectedRevision) {
       throw new TransactionError(
         'STALE_REVISION',
@@ -161,18 +178,22 @@ export class TransactionService {
         },
       ],
     };
-    const applying = await this.transition(id, expectedRevision, 'applying', {
-      pendingApply: { request, beganAt: this.now() },
-    });
-    let receipt: ApplyEditBatchReceiptV1;
+    const applying = await this.transition(
+      projectId,
+      id,
+      expectedRevision,
+      'applying',
+      {
+        pendingApply: { request, beganAt: this.now() },
+      }
+    );
+    let rawReceipt: ApplyEditBatchReceiptV1;
     try {
-      receipt = await dispatch(request);
-    } catch (error) {
-      const failure = this.failure(
-        'APPLY_FAILED',
-        error instanceof Error ? error.message : 'Editor apply failed'
-      );
+      rawReceipt = await dispatch(request);
+    } catch {
+      const failure = sanitizeFailure('APPLY_FAILED', this.now());
       return this.transition(
+        projectId,
         applying.id,
         applying.revision,
         'failed',
@@ -180,28 +201,52 @@ export class TransactionService {
         failure
       );
     }
-    const validReceipt =
-      receipt.success &&
-      receipt.requestId === request.requestId &&
-      receipt.batchId === request.batchId &&
-      receipt.afterSha256 === applying.expectedPostApplySha256;
-    if (!validReceipt) {
-      const failure =
-        receipt.error ?? this.failure('APPLY_FAILED', 'Invalid editor receipt');
+    try {
+      const receipt = parseAndValidateSuccessReceipt(
+        rawReceipt,
+        request,
+        applying,
+        applying.expectedPostApplySha256 ?? ''
+      );
       return this.transition(
+        projectId,
+        applying.id,
+        applying.revision,
+        'applied',
+        {
+          receipt,
+          pendingApply: undefined,
+          appliedAt: this.now(),
+          failure: undefined,
+        }
+      );
+    } catch (error) {
+      if (rawReceipt.success === false) {
+        const failure = parseFailedReceiptFailure(rawReceipt, this.now());
+        return this.transition(
+          projectId,
+          applying.id,
+          applying.revision,
+          'failed',
+          { failedAt: failure.at },
+          failure
+        );
+      }
+      const failure = sanitizeFailure(
+        error instanceof TransactionError && error.code !== 'INVALID_REQUEST'
+          ? error.code
+          : 'APPLY_FAILED',
+        this.now()
+      );
+      return this.transition(
+        projectId,
         applying.id,
         applying.revision,
         'failed',
-        { failedAt: failure.at, receipt },
+        { failedAt: failure.at },
         failure
       );
     }
-    return this.transition(applying.id, applying.revision, 'applied', {
-      receipt,
-      pendingApply: undefined,
-      appliedAt: this.now(),
-      failure: undefined,
-    });
   }
 
   async reconcile(
@@ -255,13 +300,8 @@ export class TransactionService {
     let currentSha256: string;
     try {
       currentSha256 = (await readFileSha256(transaction)).toLowerCase();
-    } catch (error) {
-      const failure = this.failure(
-        'RECOVERY_REQUIRED',
-        error instanceof Error
-          ? error.message
-          : 'Unable to read editor content hash during restart reconciliation'
-      );
+    } catch {
+      const failure = sanitizeFailure('RECOVERY_REQUIRED', this.now());
       return this.recoveryTransition(
         transaction,
         'failed',
@@ -281,10 +321,8 @@ export class TransactionService {
       transaction.pendingApply
     ) {
       const request = transaction.pendingApply.request;
-      return this.recoveryTransition(transaction, 'applied', {
-        pendingApply: undefined,
-        appliedAt: this.now(),
-        receipt: {
+      const receipt = parseAndValidateSuccessReceipt(
+        {
           schemaVersion: 1,
           protocolVersion: 1,
           requestId: request.requestId,
@@ -300,12 +338,17 @@ export class TransactionService {
             newText: change.replacementText,
           })),
         },
+        request,
+        transaction,
+        transaction.expectedPostApplySha256
+      );
+      return this.recoveryTransition(transaction, 'applied', {
+        pendingApply: undefined,
+        appliedAt: this.now(),
+        receipt,
       });
     }
-    const failure = this.failure(
-      'RECOVERY_REQUIRED',
-      'Editor content matches neither the before nor expected after hash'
-    );
+    const failure = sanitizeFailure('RECOVERY_REQUIRED', this.now());
     return this.recoveryTransition(
       transaction,
       'failed',
@@ -351,14 +394,32 @@ export class TransactionService {
     );
   }
 
-  private failure(
-    code: TransactionFailureV1['code'],
-    message: string
-  ): TransactionFailureV1 {
-    return { code, message, at: this.now() };
+  private async requireTransaction(
+    projectId: string,
+    id: string
+  ): Promise<EditTransactionV1> {
+    const transaction = await this.repository.get(id);
+    if (!transaction) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        `Unknown transaction ${id}`
+      );
+    }
+    this.assertProjectScope(transaction, projectId);
+    return transaction;
+  }
+
+  private assertProjectScope(
+    transaction: EditTransactionV1,
+    projectId: string
+  ): void {
+    if (transaction.projectId !== projectId) {
+      throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
+    }
   }
 
   private transition(
+    projectId: string,
     id: string,
     expectedRevision: number,
     toState: EditTransactionState,
@@ -366,6 +427,7 @@ export class TransactionService {
     failure?: TransactionFailureV1
   ): Promise<EditTransactionV1> {
     return this.repository.compareAndSwap(id, expectedRevision, (current) => {
+      this.assertProjectScope(current, projectId);
       if (!canTransition(current.state, toState)) {
         throw new TransactionError(
           'INVALID_REQUEST',
