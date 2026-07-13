@@ -8,7 +8,7 @@
 
 **Phase:** 2
 
-**Active issue:** P2-01
+**Active issue:** P2-02
 
 ## Current state
 
@@ -33,10 +33,11 @@
 - Insertion test truth is reconciled around actionable `insertAtCursor` review cards; copy-only fallback is explicitly rejected.
 - Production dependency-audit reachability is recorded in `EVIDENCE.md`; no broad dependency upgrade was mixed into the baseline slice.
 - Existing unrelated host/tooling changes remain preserved and were not rewritten by P1-01 or P1-02.
+- P2-01 is verified: versioned transaction/batch/error contracts, allowlisted provenance sanitization, runtime payload parsing, and the background-owned `iris-edit-transactions` IndexedDB store with compare-and-swap transitions, journal events, idempotent proposals, restart reconciliation, and pre-dispatch apply intent now live behind the `iris:transaction-runtime` channel. No editor writer was cut over yet.
 
 ## Next gate
 
-Execute P2-01 only: add versioned transaction, batch, and stable-error schemas plus the background-owned durable store and restart tests, without cutting any editor writer over yet.
+Execute P2-02 only: route anchored insertion acceptance from the panel through the background transaction runtime and one-member batch bridge, without removing the legacy direct writer until browser proof passes.
 
 ## Stop states
 

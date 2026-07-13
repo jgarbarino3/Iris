@@ -136,7 +136,17 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 
 ## Phase 2
 
-Pending.
+### P2-01 — Background transaction service and durable store
+
+- Added `src/transactions/contracts.ts`, `indexedDbRepository.ts`, `transactionService.ts`, and `runtime.ts` with versioned `TransactionRuntimeRequestV1` / `TransactionRuntimeResponseV1`, batch request/receipt contracts, stable error codes, allowlisted provenance sanitization, runtime payload parsing, compare-and-swap state transitions, journal events, idempotent proposal creation, pre-dispatch apply intent, and restart reconciliation for stale `preflighted` / `applying` records.
+- `src/background.ts` instantiates the sole authoritative repository/service, registers the `iris:transaction-runtime` route, and stubs active-Overleaf-tab apply/hash messaging for later editor cutover.
+- Focused transaction service tests: 10 passed, covering idempotency, CAS/journal atomicity, receipt-gated `applied`, restart exact-before/exact-after/recovery-required reconciliation, runtime protocol validation, invalid list rejection, sentinel-secret redaction, pre-dispatch applying persistence, failed/invalid receipts and dispatcher exceptions, concurrent proposal races, reconcile read failures, and cancellation before dispatch.
+- Focused MV3 ownership contract tests: 2 passed, confirming background-only repository/service ownership and one versioned runtime channel.
+- Root `npm test`: 396 passed, 0 failed.
+- Root `npm run typecheck` and `npm run build`: passed.
+- Root `npm run format:check`: passed over the scoped Phase 2 files.
+- Deterministic Playwright browser gate: 2 passed. The new `test/browser/transaction-runtime.spec.ts` uses the extension `browser-test-harness.html` page to send runtime RPCs and proves proposal/list round-trips plus extension-origin IndexedDB persistence with redacted provenance.
+- P2-01 changed transaction infrastructure only; panel/editor writers remain untouched pending P2-02 cutover.
 
 ## Final acceptance
 

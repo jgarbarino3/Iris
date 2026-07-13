@@ -1,11 +1,60 @@
 'use strict';
 
 import type { NativeHostRequest, NativeHostResponse } from './iso/messaging/nativeProtocol';
+import type {
+  ApplyEditBatchReceiptV1,
+  ApplyEditBatchRequestV1,
+  EditTransactionV1,
+  TransactionRuntimeRequestV1,
+} from './transactions/contracts';
+import { IndexedDbTransactionRepository } from './transactions/indexedDbRepository';
+import { createTransactionRuntimeHandler } from './transactions/runtime';
+import { TransactionService } from './transactions/transactionService';
 
 const NATIVE_HOST_NAME = 'com.ageaf.host';
 let nativePort: chrome.runtime.Port | null = null;
 const pending = new Map<string, (response: NativeHostResponse) => void>();
 const streamPorts = new Map<string, chrome.runtime.Port>();
+
+const transactionRepository = new IndexedDbTransactionRepository();
+const transactionService = new TransactionService({ repository: transactionRepository });
+
+async function sendToActiveOverleafTab<T>(message: unknown): Promise<T> {
+  const tabs = await chrome.tabs.query({
+    active: true,
+    currentWindow: true,
+    url: 'https://www.overleaf.com/project/*',
+  });
+  const tabId = tabs[0]?.id;
+  if (!tabId) throw new Error('EDITOR_UNAVAILABLE');
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response: T) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+const handleTransactionRequest = createTransactionRuntimeHandler({
+  service: transactionService,
+  dispatchApply: (request: ApplyEditBatchRequestV1) =>
+    sendToActiveOverleafTab<ApplyEditBatchReceiptV1>({
+      type: 'iris:transaction:apply-batch',
+      request,
+    }),
+  readFileSha256: async (transaction: EditTransactionV1) => {
+    const response = await sendToActiveOverleafTab<{ sha256?: string }>({
+      type: 'iris:transaction:read-sha256',
+      transaction,
+    });
+    if (!response?.sha256) throw new Error('EDITOR_UNAVAILABLE');
+    return response.sha256;
+  },
+});
 
 function ensureNativePort(): chrome.runtime.Port | null {
   if (nativePort) return nativePort;
@@ -61,6 +110,12 @@ function ensureNativePort(): chrome.runtime.Port | null {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'iris:transaction-runtime') {
+    void handleTransactionRequest(message.request as TransactionRuntimeRequestV1).then(
+      sendResponse
+    );
+    return true;
+  }
   if (message?.type === 'ageaf:native-request') {
     const request = message.request as NativeHostRequest;
     const port = ensureNativePort();
