@@ -235,6 +235,9 @@ export function transactionToBatchRequest(
     filePath: transaction.target.filePath,
     ...(transaction.target.fileId ? { fileId: transaction.target.fileId } : {}),
     expectedBaseSha256: transaction.baseContentSha256,
+    ...(transaction.expectedPostApplySha256
+      ? { expectedResultSha256: transaction.expectedPostApplySha256 }
+      : {}),
     changes: [
       {
         transactionId: transaction.id,

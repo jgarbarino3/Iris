@@ -1,6 +1,8 @@
 import type {
+  EditOperationV1,
   EditTransactionV1,
   ListTransactionsV1,
+  OperationJournalEventV1,
   TransactionJournalEventV1,
 } from './contracts';
 import {
@@ -15,6 +17,9 @@ const TRANSACTIONS_STORE = 'transactions';
 const JOURNAL_STORE = 'journal';
 const IDEMPOTENCY_STORE = 'idempotency_v2';
 const LEGACY_IDEMPOTENCY_STORE = 'idempotency';
+const OPERATIONS_STORE = 'operations';
+const OPERATION_JOURNAL_STORE = 'operation_journal';
+const OPERATION_IDEMPOTENCY_STORE = 'operation_idempotency';
 
 type IdempotencyRecord = {
   key: string;
@@ -22,6 +27,23 @@ type IdempotencyRecord = {
   idempotencyKey: string;
   proposalFingerprint: string;
   transactionId: string;
+};
+
+type OperationIdempotencyRecord = {
+  key: string;
+  projectId: string;
+  selectionId: string;
+  fingerprint: string;
+  operationId: string;
+};
+
+export type AtomicOperationUpdateV1 = {
+  operation: EditOperationV1;
+  operationEvent: OperationJournalEventV1;
+  transactions: Array<{
+    transaction: EditTransactionV1;
+    event: TransactionJournalEventV1;
+  }>;
 };
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -83,6 +105,29 @@ export class IndexedDbTransactionRepository {
           const store = database.createObjectStore(IDEMPOTENCY_STORE, {
             keyPath: 'key',
           });
+          store.createIndex('projectId', 'projectId', { unique: false });
+        }
+        if (!database.objectStoreNames.contains(OPERATIONS_STORE)) {
+          const store = database.createObjectStore(OPERATIONS_STORE, {
+            keyPath: 'id',
+          });
+          store.createIndex('projectId', 'projectId', { unique: false });
+          store.createIndex('state', 'state', { unique: false });
+          store.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+        if (!database.objectStoreNames.contains(OPERATION_JOURNAL_STORE)) {
+          const store = database.createObjectStore(OPERATION_JOURNAL_STORE, {
+            keyPath: 'eventId',
+          });
+          store.createIndex('operationId', 'operationId', { unique: false });
+          store.createIndex('projectId', 'projectId', { unique: false });
+          store.createIndex('timestamp', 'timestamp', { unique: false });
+        }
+        if (!database.objectStoreNames.contains(OPERATION_IDEMPOTENCY_STORE)) {
+          const store = database.createObjectStore(
+            OPERATION_IDEMPOTENCY_STORE,
+            { keyPath: 'key' }
+          );
           store.createIndex('projectId', 'projectId', { unique: false });
         }
         if (event.oldVersion > 0 && event.oldVersion < 2) {
@@ -278,6 +323,185 @@ export class IndexedDbTransactionRepository {
     );
     await transactionDone(transaction);
     return value ?? null;
+  }
+
+  async createOperationOrGet(
+    operation: EditOperationV1,
+    event: OperationJournalEventV1,
+    fingerprint: string
+  ): Promise<EditOperationV1> {
+    const key = composeIdempotencyKey(
+      operation.projectId,
+      operation.selectionId
+    );
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [OPERATIONS_STORE, OPERATION_JOURNAL_STORE, OPERATION_IDEMPOTENCY_STORE],
+      'readwrite'
+    );
+    const operations = idbTransaction.objectStore(OPERATIONS_STORE);
+    const idempotency = idbTransaction.objectStore(OPERATION_IDEMPOTENCY_STORE);
+    const existing = await requestResult(
+      idempotency.get(key) as IDBRequest<OperationIdempotencyRecord | undefined>
+    );
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          'Selection identity reused with a different transaction subset'
+        );
+      }
+      const stored = await requestResult(
+        operations.get(existing.operationId) as IDBRequest<
+          EditOperationV1 | undefined
+        >
+      );
+      await transactionDone(idbTransaction);
+      if (!stored) {
+        throw new Error('Selection identity references a missing operation');
+      }
+      return stored;
+    }
+    operations.add(operation);
+    idbTransaction.objectStore(OPERATION_JOURNAL_STORE).add(event);
+    idempotency.add({
+      key,
+      projectId: operation.projectId,
+      selectionId: operation.selectionId,
+      fingerprint,
+      operationId: operation.id,
+    } as OperationIdempotencyRecord);
+    await transactionDone(idbTransaction);
+    return operation;
+  }
+
+  async getOperation(id: string): Promise<EditOperationV1 | null> {
+    const database = await this.open();
+    const transaction = database.transaction(OPERATIONS_STORE, 'readonly');
+    const value = await requestResult(
+      transaction.objectStore(OPERATIONS_STORE).get(id) as IDBRequest<
+        EditOperationV1 | undefined
+      >
+    );
+    await transactionDone(transaction);
+    return value ?? null;
+  }
+
+  async listOperations(projectId: string): Promise<EditOperationV1[]> {
+    const database = await this.open();
+    const transaction = database.transaction(OPERATIONS_STORE, 'readonly');
+    const values = await requestResult(
+      transaction
+        .objectStore(OPERATIONS_STORE)
+        .index('projectId')
+        .getAll(projectId) as IDBRequest<EditOperationV1[]>
+    );
+    await transactionDone(transaction);
+    return values.sort(
+      (left, right) =>
+        right.updatedAt - left.updatedAt || left.id.localeCompare(right.id)
+    );
+  }
+
+  async getOperationJournal(
+    operationId: string
+  ): Promise<OperationJournalEventV1[]> {
+    const database = await this.open();
+    const transaction = database.transaction(
+      OPERATION_JOURNAL_STORE,
+      'readonly'
+    );
+    const values = await requestResult(
+      transaction
+        .objectStore(OPERATION_JOURNAL_STORE)
+        .index('operationId')
+        .getAll(operationId) as IDBRequest<OperationJournalEventV1[]>
+    );
+    await transactionDone(transaction);
+    return values.sort((left, right) => left.revision - right.revision);
+  }
+
+  async compareAndSwapOperation(
+    operationId: string,
+    expectedOperationRevision: number,
+    expectedTransactionRevisions: Map<string, number>,
+    update: (
+      operation: EditOperationV1,
+      transactions: EditTransactionV1[]
+    ) => AtomicOperationUpdateV1
+  ): Promise<EditOperationV1> {
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [
+        OPERATIONS_STORE,
+        OPERATION_JOURNAL_STORE,
+        TRANSACTIONS_STORE,
+        JOURNAL_STORE,
+      ],
+      'readwrite'
+    );
+    const operationStore = idbTransaction.objectStore(OPERATIONS_STORE);
+    const transactionStore = idbTransaction.objectStore(TRANSACTIONS_STORE);
+    const operation = await requestResult(
+      operationStore.get(operationId) as IDBRequest<EditOperationV1 | undefined>
+    );
+    if (!operation) {
+      idbTransaction.abort();
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        `Unknown operation ${operationId}`
+      );
+    }
+    if (operation.revision !== expectedOperationRevision) {
+      idbTransaction.abort();
+      throw new TransactionError(
+        'STALE_REVISION',
+        `Expected operation revision ${expectedOperationRevision}, found ${operation.revision}`
+      );
+    }
+    const transactions: EditTransactionV1[] = [];
+    for (const [
+      transactionId,
+      expectedRevision,
+    ] of expectedTransactionRevisions) {
+      const transaction = await requestResult(
+        transactionStore.get(transactionId) as IDBRequest<
+          EditTransactionV1 | undefined
+        >
+      );
+      if (!transaction) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          `Unknown transaction ${transactionId}`
+        );
+      }
+      if (transaction.revision !== expectedRevision) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'STALE_REVISION',
+          `Expected revision ${expectedRevision}, found ${transaction.revision}`
+        );
+      }
+      transactions.push(transaction);
+    }
+
+    const next = update(operation, transactions);
+    if (next.operation.revision !== operation.revision + 1) {
+      idbTransaction.abort();
+      throw new Error('Operation revision must increment exactly once');
+    }
+    operationStore.put(next.operation);
+    idbTransaction
+      .objectStore(OPERATION_JOURNAL_STORE)
+      .add(next.operationEvent);
+    for (const entry of next.transactions) {
+      transactionStore.put(entry.transaction);
+      idbTransaction.objectStore(JOURNAL_STORE).add(entry.event);
+    }
+    await transactionDone(idbTransaction);
+    return next.operation;
   }
 
   async list(query: ListTransactionsV1): Promise<EditTransactionV1[]> {

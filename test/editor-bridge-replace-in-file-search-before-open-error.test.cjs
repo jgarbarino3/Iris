@@ -7,7 +7,7 @@ test('Main editor bridge proves target file identity before strict replacement v
   const bridgePath = path.join(__dirname, '..', 'src', 'main', 'editorBridge', 'bridge.ts');
   const contents = fs.readFileSync(bridgePath, 'utf8');
   const identityNeedle = 'await activateExactFile(request.filePath, request.fileId)';
-  const validationNeedle = 'await validateDurableReplacementBatch(request, snapshot)';
+  const validationNeedle = 'await planFileAtomicBatch(request, snapshot)';
 
   const identityIndex = contents.indexOf(identityNeedle);
   const validationIndex = contents.indexOf(validationNeedle);

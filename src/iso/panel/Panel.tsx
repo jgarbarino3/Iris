@@ -48,7 +48,9 @@ import {
 } from '../../transactions/anchoredInsertion';
 import { buildDurableReplacementProposal } from '../../transactions/durableReplacement';
 import type {
+  EditOperationV1,
   EditTransactionV1,
+  RecoveryBundleV1,
   TransactionRuntimeActionV1,
   TransactionRuntimeResponseV1,
 } from '../../transactions/contracts';
@@ -994,6 +996,8 @@ const Panel = () => {
   const [patchActionErrors, setPatchActionErrors] = useState<
     Record<string, string>
   >({});
+  const [recoveryOperation, setRecoveryOperation] =
+    useState<EditOperationV1 | null>(null);
   const pendingPatchFeedbackTargetRef = useRef<PatchFeedbackTarget | null>(
     null
   );
@@ -9351,125 +9355,234 @@ const Panel = () => {
     };
   };
 
+  type PreparedPatchSelection = {
+    messageId: string;
+    nextText: string;
+    transaction: EditTransactionV1;
+  };
+
+  const preparePatchTransaction = async (
+    messageId: string,
+    patchReview: StoredPatchReview,
+    overrideText?: string
+  ): Promise<PreparedPatchSelection> => {
+    const nextText =
+      typeof overrideText === 'string' ? overrideText : patchReview.text;
+    let transaction = await getDurableReviewTransaction(patchReview);
+    if (
+      transaction.state === 'proposed' &&
+      typeof patchReview.transactionRevision === 'number' &&
+      transaction.revision !== patchReview.transactionRevision
+    ) {
+      throw new Error('Durable edit proposal revision is stale');
+    }
+    if (transaction.state !== 'proposed') {
+      throw new Error(
+        transaction.failure?.message ?? 'Durable edit is not applicable'
+      );
+    }
+    if (transaction.replacementText !== nextText) {
+      if (patchReview.kind === 'insertAtCursor') {
+        throw new Error('Edited insertion text requires a new proposal');
+      }
+      const replacementIdentity = await sha256Text(nextText);
+      const previous = transaction;
+      transaction = await transactionRpc<EditTransactionV1>('propose', {
+        idempotencyKey: `${previous.idempotencyKey}:text:${replacementIdentity}`,
+        projectId: previous.projectId,
+        ...(previous.conversationId
+          ? { conversationId: previous.conversationId }
+          : {}),
+        ...(previous.missionId ? { missionId: previous.missionId } : {}),
+        ...(previous.sourceJobId ? { sourceJobId: previous.sourceJobId } : {}),
+        intent: 'replace',
+        target: previous.target,
+        expectedText: previous.expectedText,
+        replacementText: nextText,
+        prefix: previous.prefix,
+        suffix: previous.suffix,
+        baseContentSha256: previous.baseContentSha256,
+        proposalOrder: previous.proposalOrder,
+        ...(previous.provenance ? { provenance: previous.provenance } : {}),
+      });
+      updatePatchReviewMessage(messageId, (current) => ({
+        ...current,
+        text: nextText,
+        transactionId: transaction.id,
+        transactionRevision: transaction.revision,
+        projectId: transaction.projectId,
+        transactionError: undefined,
+        transactionOutcome: undefined,
+        operationId: undefined,
+      }));
+      if (previous.id !== transaction.id) {
+        try {
+          await transactionRpc<EditTransactionV1>('reject', {
+            projectId: previous.projectId,
+            id: previous.id,
+            expectedRevision: previous.revision,
+          });
+        } catch {
+          // The replacement proposal is the selected card's durable authority.
+        }
+      }
+    }
+    return { messageId, nextText, transaction };
+  };
+
+  const describeOperationFailure = (operation: EditOperationV1) => {
+    const stage = operation.fileBatches.find((batch) => batch.failureStage)
+      ?.failureStage;
+    if (operation.state === 'recovery_required') {
+      return {
+        outcome: 'recovery-required' as const,
+        message:
+          'Recovery required: compensation could not restore every prior file. Export the recovery bundle before making more automated edits.',
+      };
+    }
+    if (operation.state === 'compensated') {
+      return {
+        outcome: 'compensated-failure' as const,
+        message:
+          'Multi-file apply failed; every previously changed file was restored by acknowledged compensation.',
+      };
+    }
+    if (stage === 'preflight') {
+      return {
+        outcome: 'preflight-rejected' as const,
+        message: 'Preflight rejected the selected batch; no editor mutation occurred.',
+      };
+    }
+    return {
+      outcome: 'file-batch-failed' as const,
+      message:
+        stage === 'receipt'
+          ? 'The file batch receipt was malformed or incomplete; no card was accepted.'
+          : 'The file batch failed without an acknowledged application; no card was accepted.',
+    };
+  };
+
+  const acceptPatchSubset = async (
+    selections: Array<{
+      messageId: string;
+      patchReview: StoredPatchReview;
+      overrideText?: string;
+    }>
+  ): Promise<boolean> => {
+    if (selections.length === 0) return false;
+    const prepared: PreparedPatchSelection[] = [];
+    try {
+      for (const selection of selections) {
+        clearPatchErrorForMessage(selection.messageId);
+        prepared.push(
+          await preparePatchTransaction(
+            selection.messageId,
+            selection.patchReview,
+            selection.overrideText
+          )
+        );
+      }
+      const projectIds = new Set(
+        prepared.map((entry) => entry.transaction.projectId)
+      );
+      if (projectIds.size !== 1) {
+        throw new Error('Selected edits do not belong to one project');
+      }
+      const projectId = prepared[0].transaction.projectId;
+      const members = prepared.map((entry) => ({
+        id: entry.transaction.id,
+        expectedRevision: entry.transaction.revision,
+      }));
+      const selectionIdentity = await sha256Text(
+        JSON.stringify(
+          [...members].sort((left, right) => left.id.localeCompare(right.id))
+        )
+      );
+      const operation = await transactionRpc<EditOperationV1>(
+        'applySelection',
+        {
+          projectId,
+          selectionId: `review:${selectionIdentity}`,
+          members,
+        }
+      );
+
+      if (operation.state === 'applied') {
+        const appliedById = new Map<string, EditTransactionV1>();
+        for (const entry of prepared) {
+          const transaction = await transactionRpc<EditTransactionV1 | null>(
+            'get',
+            { projectId, id: entry.transaction.id }
+          );
+          if (
+            !transaction ||
+            transaction.state !== 'applied' ||
+            transaction.receipt?.success !== true
+          ) {
+            throw new Error(
+              'Atomic batch outcome is missing an acknowledged member'
+            );
+          }
+          appliedById.set(transaction.id, transaction);
+        }
+        for (const entry of prepared) {
+          const transaction = appliedById.get(entry.transaction.id)!;
+          updatePatchReviewMessage(entry.messageId, (current) => ({
+            ...current,
+            text: entry.nextText,
+            status: 'accepted',
+            transactionId: transaction.id,
+            transactionRevision: transaction.revision,
+            projectId: transaction.projectId,
+            transactionError: undefined,
+            transactionOutcome: undefined,
+            operationId: operation.id,
+          }));
+          clearPatchErrorForMessage(entry.messageId);
+        }
+        return true;
+      }
+
+      const failure = describeOperationFailure(operation);
+      if (operation.state === 'recovery_required') {
+        setRecoveryOperation(operation);
+      }
+      setPatchActionErrors((previous) => {
+        const next = { ...previous };
+        for (const entry of prepared) next[entry.messageId] = failure.message;
+        return next;
+      });
+      for (const entry of prepared) {
+        updatePatchReviewMessage(entry.messageId, (current) => ({
+          ...current,
+          transactionError: failure.message,
+          transactionOutcome: failure.outcome,
+          operationId: operation.id,
+        }));
+      }
+      return false;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to apply selected patches';
+      const ids =
+        prepared.length > 0
+          ? prepared.map((entry) => entry.messageId)
+          : selections.map((entry) => entry.messageId);
+      setPatchActionErrors((previous) => {
+        const next = { ...previous };
+        for (const id of ids) next[id] = message;
+        return next;
+      });
+      return false;
+    }
+  };
+
   const acceptSinglePatch = async (
     messageId: string,
     patchReview: StoredPatchReview,
     overrideText?: string
-  ): Promise<boolean> => {
-    clearPatchErrorForMessage(messageId);
-
-    try {
-      const nextText =
-        typeof overrideText === 'string' ? overrideText : patchReview.text;
-      let transaction = await getDurableReviewTransaction(patchReview);
-      if (
-        transaction.state === 'proposed' &&
-        typeof patchReview.transactionRevision === 'number' &&
-        transaction.revision !== patchReview.transactionRevision
-      ) {
-        throw new Error('Durable edit proposal revision is stale');
-      }
-      if (transaction.replacementText !== nextText) {
-        if (patchReview.kind === 'insertAtCursor') {
-          throw new Error('Edited insertion text requires a new proposal');
-        }
-        const replacementIdentity = await sha256Text(nextText);
-        const previous = transaction;
-        transaction = await transactionRpc<EditTransactionV1>('propose', {
-          idempotencyKey: `${previous.idempotencyKey}:text:${replacementIdentity}`,
-          projectId: previous.projectId,
-          ...(previous.conversationId
-            ? { conversationId: previous.conversationId }
-            : {}),
-          ...(previous.missionId ? { missionId: previous.missionId } : {}),
-          ...(previous.sourceJobId
-            ? { sourceJobId: previous.sourceJobId }
-            : {}),
-          intent: 'replace',
-          target: previous.target,
-          expectedText: previous.expectedText,
-          replacementText: nextText,
-          prefix: previous.prefix,
-          suffix: previous.suffix,
-          baseContentSha256: previous.baseContentSha256,
-          proposalOrder: previous.proposalOrder,
-          ...(previous.provenance ? { provenance: previous.provenance } : {}),
-        });
-        updatePatchReviewMessage(messageId, (current) => ({
-          ...current,
-          text: nextText,
-          transactionId: transaction.id,
-          transactionRevision: transaction.revision,
-          projectId: transaction.projectId,
-          transactionError: undefined,
-        }));
-        if (previous.state === 'proposed' && previous.id !== transaction.id) {
-          try {
-            await transactionRpc<EditTransactionV1>('reject', {
-              projectId: previous.projectId,
-              id: previous.id,
-              expectedRevision: previous.revision,
-            });
-          } catch {
-            // The new transaction is authoritative for this card projection.
-          }
-        }
-      }
-
-      if (transaction.state === 'proposed') {
-        transaction = await transactionRpc<EditTransactionV1>('preflight', {
-          projectId: transaction.projectId,
-          id: transaction.id,
-          expectedRevision: transaction.revision,
-        });
-      }
-      if (transaction.state === 'preflighted') {
-        transaction = await transactionRpc<EditTransactionV1>('apply', {
-          projectId: transaction.projectId,
-          id: transaction.id,
-          expectedRevision: transaction.revision,
-        });
-      }
-      if (transaction.state === 'applying') {
-        await transactionRpc<EditTransactionV1[]>('reconcile', {
-          projectId: transaction.projectId,
-        });
-        const reconciledTransaction = await transactionRpc<EditTransactionV1 | null>('get', {
-          projectId: transaction.projectId,
-          id: transaction.id,
-        });
-        if (!reconciledTransaction) {
-          throw new Error('Durable edit transaction is missing');
-        }
-        transaction = reconciledTransaction;
-      }
-      if (
-        transaction.state !== 'applied' ||
-        transaction.receipt?.success !== true
-      ) {
-        throw new Error(
-          transaction.failure?.message ??
-            'Edit was not acknowledged by a durable receipt'
-        );
-      }
-      const appliedTransaction = transaction;
-      updatePatchReviewMessage(messageId, (current) => ({
-        ...current,
-        text: nextText,
-        status: 'accepted',
-        transactionId: appliedTransaction.id,
-        transactionRevision: appliedTransaction.revision,
-        projectId: appliedTransaction.projectId,
-        transactionError: undefined,
-      }));
-      return true;
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to apply patch';
-      setPatchActionErrors((prev) => ({ ...prev, [messageId]: message }));
-      return false;
-    }
-  };
+  ): Promise<boolean> =>
+    acceptPatchSubset([{ messageId, patchReview, overrideText }]);
 
   const onAcceptPatchReviewMessage = async (
     messageId: string,
@@ -9494,59 +9607,16 @@ const Panel = () => {
     if (bulkActionBusy || patchActionBusyId) return;
     setBulkActionBusy(true);
     try {
-      const pendingMessages = messagesRef.current.filter((message) => {
-        if (!message.patchReview) return false;
-        const status = (message.patchReview as any).status ?? 'pending';
-        return status === 'pending';
-      });
-
-      const groupedByFile = new Map<string, Message[]>();
-      for (const message of pendingMessages) {
-        const patchReview = message.patchReview;
-        if (!patchReview) continue;
-        const fileKey =
-          patchReview.kind === 'replaceRangeInFile'
-            ? patchReview.filePath
-            : patchReview.kind === 'replaceSelection'
-              ? patchReview.fileName ?? '__selection__'
-              : '__insert_at_cursor__';
-        const group = groupedByFile.get(fileKey) ?? [];
-        group.push(message);
-        groupedByFile.set(fileKey, group);
-      }
-
-      for (const fileMessages of groupedByFile.values()) {
-        fileMessages.sort((a, b) => {
-          const aPatch = a.patchReview;
-          const bPatch = b.patchReview;
-          const aFrom =
-            aPatch &&
-              (aPatch.kind === 'replaceSelection' ||
-                aPatch.kind === 'replaceRangeInFile')
-              ? aPatch.from ?? 0
-              : 0;
-          const bFrom =
-            bPatch &&
-              (bPatch.kind === 'replaceSelection' ||
-                bPatch.kind === 'replaceRangeInFile')
-              ? bPatch.from ?? 0
-              : 0;
-          return bFrom - aFrom;
-        });
-
-        for (const message of fileMessages) {
-          const latest = messagesRef.current.find((entry) => entry.id === message.id);
-          if (!latest?.patchReview) continue;
-          const latestStatus = (latest.patchReview as any).status ?? 'pending';
-          if (latestStatus !== 'pending') continue;
-          try {
-            await acceptSinglePatch(latest.id, latest.patchReview);
-          } catch {
-            // Continue processing remaining hunks.
-          }
-          await new Promise((resolve) => setTimeout(resolve, 120));
-        }
-      }
+      const selections = messagesRef.current
+        .filter((message) => {
+          if (!message.patchReview) return false;
+          return ((message.patchReview as any).status ?? 'pending') === 'pending';
+        })
+        .map((message) => ({
+          messageId: message.id,
+          patchReview: message.patchReview!,
+        }));
+      await acceptPatchSubset(selections);
     } finally {
       setBulkActionBusy(false);
     }
@@ -9563,28 +9633,49 @@ const Panel = () => {
 
     setBulkActionBusy(true);
     try {
-      for (const entry of pendingEntries) {
-        const patchReview = entry.patchReview;
-        if (!patchReview) continue;
-        const prevStatus = ((patchReview as any).status ??
-          'pending') as PatchReviewStatus;
-        try {
-          const transaction = await rejectDurableReviewTransaction(patchReview);
-          updatePatchReviewMessage(entry.id, (current) => ({
-            ...current,
-            status: 'rejected',
-            transactionRevision: transaction.revision,
-            transactionError: undefined,
-          }));
-          clearPatchErrorForMessage(entry.id);
-        } catch (error) {
-          setPatchActionErrors((previous) => ({
-            ...previous,
-            [entry.id]:
-              error instanceof Error ? error.message : String(error),
-          }));
+      const transactions = await Promise.all(
+        pendingEntries.map((entry) =>
+          getDurableReviewTransaction(entry.patchReview!)
+        )
+      );
+      const projectId = transactions[0].projectId;
+      const members = transactions.map((transaction) => ({
+        id: transaction.id,
+        expectedRevision: transaction.revision,
+      }));
+      const selectionIdentity = await sha256Text(
+        JSON.stringify(
+          [...members].sort((left, right) => left.id.localeCompare(right.id))
+        )
+      );
+      const rejected = await transactionRpc<EditTransactionV1[]>(
+        'rejectSelection',
+        {
+          projectId,
+          selectionId: `reject:${selectionIdentity}`,
+          members,
         }
+      );
+      const rejectedById = new Map(rejected.map((entry) => [entry.id, entry]));
+      for (let index = 0; index < pendingEntries.length; index += 1) {
+        const entry = pendingEntries[index];
+        const transaction = rejectedById.get(transactions[index].id);
+        if (!transaction) continue;
+        updatePatchReviewMessage(entry.id, (current) => ({
+          ...current,
+          status: 'rejected',
+          transactionRevision: transaction.revision,
+          transactionError: undefined,
+          transactionOutcome: undefined,
+        }));
+        clearPatchErrorForMessage(entry.id);
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        ...Object.fromEntries(pendingEntries.map((entry) => [entry.id, message])),
+      }));
     } finally {
       setBulkActionBusy(false);
     }
@@ -9594,8 +9685,7 @@ const Panel = () => {
     if (bulkActionBusy || patchActionBusyId) return;
     setBulkActionBusy(true);
     try {
-      const currentById = new Map(messagesRef.current.map((entry) => [entry.id, entry]));
-      const ids = messagesRef.current
+      const selections = messagesRef.current
         .filter((entry) => {
           const patchReview = entry.patchReview;
           return Boolean(
@@ -9604,38 +9694,15 @@ const Panel = () => {
             patchReview.filePath.toLowerCase() === fileKey
           );
         })
-        .map((entry) => entry.id);
-      if (ids.length === 0) return;
-
-      const pendingMessages = ids
-        .map((id) => currentById.get(id))
-        .filter((entry): entry is Message => {
-          if (!entry?.patchReview) return false;
-          if (entry.patchReview.kind !== 'replaceRangeInFile') return false;
-          const status = (entry.patchReview as any).status ?? 'pending';
-          return status === 'pending';
-        })
-        .sort((a, b) => {
-          const aFrom =
-            a.patchReview && a.patchReview.kind === 'replaceRangeInFile'
-              ? a.patchReview.from ?? 0
-              : 0;
-          const bFrom =
-            b.patchReview && b.patchReview.kind === 'replaceRangeInFile'
-              ? b.patchReview.from ?? 0
-              : 0;
-          return bFrom - aFrom;
-        });
-
-      for (const message of pendingMessages) {
-        if (!message.patchReview) continue;
-        try {
-          await acceptSinglePatch(message.id, message.patchReview);
-        } catch {
-          // Continue processing remaining hunks in this file.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 120));
-      }
+        .filter(
+          (entry) =>
+            ((entry.patchReview as any)?.status ?? 'pending') === 'pending'
+        )
+        .map((entry) => ({
+          messageId: entry.id,
+          patchReview: entry.patchReview!,
+        }));
+      await acceptPatchSubset(selections);
     } finally {
       setBulkActionBusy(false);
     }
@@ -9657,29 +9724,84 @@ const Panel = () => {
     if (pendingEntries.length === 0) return;
     setBulkActionBusy(true);
     try {
-      for (const entry of pendingEntries) {
-        const message = messagesRef.current.find((item) => item.id === entry);
-        if (!message?.patchReview) continue;
-        try {
-          const transaction = await rejectDurableReviewTransaction(
-            message.patchReview
-          );
-          updatePatchReviewMessage(entry, (current) => ({
-            ...current,
-            status: 'rejected',
-            transactionRevision: transaction.revision,
-            transactionError: undefined,
-          }));
-          clearPatchErrorForMessage(entry);
-        } catch (error) {
-          setPatchActionErrors((previous) => ({
-            ...previous,
-            [entry]: error instanceof Error ? error.message : String(error),
-          }));
+      const selectedMessages = pendingEntries
+        .map((id) => messagesRef.current.find((entry) => entry.id === id))
+        .filter((entry): entry is Message => Boolean(entry?.patchReview));
+      const transactions = await Promise.all(
+        selectedMessages.map((entry) =>
+          getDurableReviewTransaction(entry.patchReview!)
+        )
+      );
+      const projectId = transactions[0].projectId;
+      const members = transactions.map((transaction) => ({
+        id: transaction.id,
+        expectedRevision: transaction.revision,
+      }));
+      const selectionIdentity = await sha256Text(
+        JSON.stringify(
+          [...members].sort((left, right) => left.id.localeCompare(right.id))
+        )
+      );
+      const rejected = await transactionRpc<EditTransactionV1[]>(
+        'rejectSelection',
+        {
+          projectId,
+          selectionId: `reject:${selectionIdentity}`,
+          members,
         }
+      );
+      const rejectedById = new Map(rejected.map((entry) => [entry.id, entry]));
+      for (let index = 0; index < selectedMessages.length; index += 1) {
+        const transaction = rejectedById.get(transactions[index].id);
+        if (!transaction) continue;
+        updatePatchReviewMessage(selectedMessages[index].id, (current) => ({
+          ...current,
+          status: 'rejected',
+          transactionRevision: transaction.revision,
+          transactionError: undefined,
+          transactionOutcome: undefined,
+        }));
+        clearPatchErrorForMessage(selectedMessages[index].id);
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        ...Object.fromEntries(pendingEntries.map((id) => [id, message])),
+      }));
     } finally {
       setBulkActionBusy(false);
+    }
+  };
+
+  const onExportRecoveryBundle = async () => {
+    if (!recoveryOperation) return;
+    try {
+      const bundle = await transactionRpc<RecoveryBundleV1>(
+        'exportRecoveryBundle',
+        {
+          projectId: recoveryOperation.projectId,
+          id: recoveryOperation.id,
+        }
+      );
+      const blob = new Blob([`${JSON.stringify(bundle, null, 2)}\n`], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `iris-recovery-${bundle.operationId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Recovery bundle export failed';
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        recovery: message,
+      }));
     }
   };
 
@@ -10876,6 +10998,21 @@ const Panel = () => {
                   </button>
                 ) : null}
               </div>
+              {recoveryOperation ? (
+                <div class="ageaf-patch-review__warning ageaf-recovery-required">
+                  <span>
+                    Recovery required. Automatic edit mutations are stopped for
+                    this project.
+                  </span>
+                  <button
+                    class="ageaf-panel__apply is-secondary"
+                    type="button"
+                    onClick={() => void onExportRecoveryBundle()}
+                  >
+                    Export recovery JSON
+                  </button>
+                </div>
+              ) : null}
               {showSummaryCard ? (
                 <FileChangeSummaryCard
                   files={fileSummary}

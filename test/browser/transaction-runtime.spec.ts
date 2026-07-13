@@ -1,6 +1,6 @@
 import { expect, test } from './fixtures';
 
-const TRANSACTION_DATABASE_VERSION = 2;
+const TRANSACTION_DATABASE_VERSION = 3;
 
 test('background transaction runtime persists proposals in extension IndexedDB', async ({
   context,

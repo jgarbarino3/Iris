@@ -6,9 +6,8 @@ import { mountPanel, unmountPanel } from './panel/Panel';
 import {
   sha256Text,
   transactionToBatchRequest,
-  validateAnchoredInsertionBatch,
 } from '../transactions/anchoredInsertion';
-import { validateDurableReplacementBatch } from '../transactions/durableReplacement';
+import { planFileAtomicBatch } from '../transactions/fileBatch';
 import type {
   ApplyEditBatchRequestV1,
   EditTransactionV1,
@@ -192,6 +191,11 @@ try {
       window.dispatchEvent(new CustomEvent('ageaf:settings:open'));
       return undefined;
     }
+    if (request?.type === 'iris:transaction:test-project-id') {
+      const match = window.location.pathname.match(/^\/project\/([^/?#]+)/);
+      sendResponse({ projectId: match?.[1] ?? null });
+      return undefined;
+    }
     if (request?.type === 'iris:transaction:preflight-edit') {
       const transaction = request.transaction as EditTransactionV1;
       void (async () => {
@@ -219,14 +223,45 @@ try {
           ...(file.fileId ? { fileId: file.fileId } : {}),
           content: file.content,
         };
-        const validation =
-          transaction.intent === 'insert'
-            ? await validateAnchoredInsertionBatch(batch, snapshot)
-            : await validateDurableReplacementBatch(batch, snapshot);
+        const validation = await planFileAtomicBatch(batch, snapshot);
         return {
           ok: true,
           expectedPostApplySha256: validation.afterSha256,
         };
+      })().then(sendResponse, (error) =>
+        sendResponse({
+          ok: false,
+          error: {
+            code:
+              error instanceof TransactionError
+                ? error.code
+                : sanitizeFailureCode(undefined),
+          },
+        })
+      );
+      return true;
+    }
+    if (request?.type === 'iris:transaction:preflight-batch') {
+      const batch = request.request as ApplyEditBatchRequestV1;
+      void (async () => {
+        const file = await editorAdapter.requestTargetFile({
+          projectId: batch.projectId,
+          filePath: batch.filePath,
+          ...(batch.fileId ? { fileId: batch.fileId } : {}),
+        });
+        if (!file?.ok || typeof file.content !== 'string') {
+          throw new TransactionError(
+            sanitizeFailureCode(file?.error),
+            file?.error ?? 'EDITOR_UNAVAILABLE'
+          );
+        }
+        const plan = await planFileAtomicBatch(batch, {
+          projectId: batch.projectId,
+          filePath: file.filePath,
+          ...(file.fileId ? { fileId: file.fileId } : {}),
+          content: file.content,
+        });
+        return { ok: true, plan };
       })().then(sendResponse, (error) =>
         sendResponse({
           ok: false,
@@ -271,6 +306,27 @@ try {
         .then(async (file) => ({
           ...(file?.ok && typeof file.content === 'string'
             ? { sha256: await sha256Text(file.content) }
+            : {}),
+        }))
+        .then(sendResponse);
+      return true;
+    }
+    if (request?.type === 'iris:transaction:read-file') {
+      const target = request.target as {
+        projectId: string;
+        filePath: string;
+        fileId?: string;
+      };
+      void editorAdapter
+        .requestTargetFile(target)
+        .then((file) => ({
+          ok: Boolean(file?.ok && typeof file.content === 'string'),
+          projectId: target.projectId,
+          filePath: file?.filePath ?? target.filePath,
+          ...(file?.fileId ? { fileId: file.fileId } : {}),
+          content: typeof file?.content === 'string' ? file.content : '',
+          ...(!file?.ok && file?.error
+            ? { error: { code: sanitizeFailureCode(file.error) } }
             : {}),
         }))
         .then(sendResponse);

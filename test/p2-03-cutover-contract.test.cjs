@@ -22,14 +22,13 @@ test('P2-03 replacement proposals persist exact transaction identity on cards', 
   assert.match(store, /kind: 'replaceRangeInFile'[\s\S]*transactionId\?: string/);
 });
 
-test('P2-03 review cards and inline overlays issue transaction commands only', () => {
+test('P2-03 review cards and inline overlays remain projections of transaction commands', () => {
   const panel = read('src/iso/panel/Panel.tsx');
   const overlay = read('src/main/inlineDiffOverlay.ts');
 
   assert.match(panel, /PANEL_OVERLAY_ACTION_EVENT/);
   assert.match(panel, /onAcceptPatchReviewRef\.current/);
-  assert.match(panel, /transactionRpc<EditTransactionV1>\('preflight'/);
-  assert.match(panel, /transactionRpc<EditTransactionV1>\('apply'/);
+  assert.match(panel, /transactionRpc<EditOperationV1>\(\s*'applySelection'/);
   assert.match(overlay, /emitOverlayAction\([\s\S]*'accept'/);
   assert.doesNotMatch(overlay, /applyReplacementAtRange|applyReplaceRange|applyReplaceInFile/);
 });
@@ -48,5 +47,5 @@ test('P2-03 production cutover leaves one acknowledged replacement writer', () =
   assert.match(adapter, /applyEditBatch/);
   assert.match(bridge, /executeEditBatch/);
   assert.match(contentScript, /iris:transaction:preflight-edit/);
-  assert.match(contentScript, /validateDurableReplacementBatch/);
+  assert.match(contentScript, /planFileAtomicBatch/);
 });

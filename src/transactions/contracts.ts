@@ -1,6 +1,6 @@
 export const TRANSACTION_SCHEMA_VERSION = 1 as const;
 export const TRANSACTION_PROTOCOL_VERSION = 1 as const;
-export const TRANSACTION_DATABASE_VERSION = 2 as const;
+export const TRANSACTION_DATABASE_VERSION = 3 as const;
 
 export type TransactionRuntimeContext = {
   boundProjectId: string | null;
@@ -80,6 +80,8 @@ export type AppliedChangeReceiptV1 = {
   to: number;
   oldText: string;
   newText: string;
+  resultFrom?: number;
+  resultTo?: number;
 };
 
 export type ApplyEditChangeV1 = {
@@ -102,6 +104,7 @@ export type ApplyEditBatchRequestV1 = {
   filePath: string;
   fileId?: string;
   expectedBaseSha256: string;
+  expectedResultSha256?: string;
   changes: ApplyEditChangeV1[];
 };
 
@@ -155,6 +158,110 @@ export type EditTransactionV1 = {
   revertedByTransactionId?: string;
 };
 
+export type FileBatchStateV1 =
+  | 'proposed'
+  | 'preflighted'
+  | 'applying'
+  | 'applied'
+  | 'compensating'
+  | 'compensated'
+  | 'failed'
+  | 'recovery_required';
+
+export type EditOperationStateV1 =
+  | 'proposed'
+  | 'preflighted'
+  | 'applying'
+  | 'applied'
+  | 'compensating'
+  | 'compensated'
+  | 'failed'
+  | 'recovery_required';
+
+export type DurableFileBatchV1 = {
+  schemaVersion: 1;
+  id: string;
+  order: number;
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+  transactionIds: string[];
+  state: FileBatchStateV1;
+  expectedBaseSha256: string;
+  expectedResultSha256?: string;
+  request: ApplyEditBatchRequestV1;
+  receipt?: ApplyEditBatchReceiptV1;
+  compensationRequest?: ApplyEditBatchRequestV1;
+  compensationReceipt?: ApplyEditBatchReceiptV1;
+  failure?: TransactionFailureV1;
+  failureStage?:
+    | 'preflight'
+    | 'dispatch'
+    | 'receipt'
+    | 'compensation-preflight'
+    | 'compensation-dispatch'
+    | 'compensation-receipt';
+};
+
+export type EditOperationV1 = {
+  schemaVersion: 1;
+  id: string;
+  selectionId: string;
+  projectId: string;
+  members: Array<{ transactionId: string; initialRevision: number }>;
+  transactionIds: string[];
+  state: EditOperationStateV1;
+  revision: number;
+  fileBatches: DurableFileBatchV1[];
+  createdAt: number;
+  updatedAt: number;
+  failure?: TransactionFailureV1;
+  recoveryBundle?: RecoveryBundleV1;
+};
+
+export type OperationJournalEventV1 = {
+  schemaVersion: 1;
+  eventId: string;
+  operationId: string;
+  projectId: string;
+  revision: number;
+  fromState: EditOperationStateV1 | null;
+  toState: EditOperationStateV1;
+  timestamp: number;
+  batchId?: string;
+  failure?: TransactionFailureV1;
+};
+
+export type RecoveryBundleChangeV1 = {
+  transactionId: string;
+  beforeText: string;
+  currentObservedText: string;
+  proposedText: string;
+  beforeSha256: string;
+  currentSha256: string;
+  proposedSha256: string;
+};
+
+export type RecoveryBundleFileV1 = {
+  batchId: string;
+  filePath: string;
+  transactionIds: string[];
+  changes: RecoveryBundleChangeV1[];
+  forwardReceipt?: ApplyEditBatchReceiptV1;
+  compensationReceipt?: ApplyEditBatchReceiptV1;
+  errorCodes: TransactionErrorCode[];
+};
+
+export type RecoveryBundleV1 = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  operationId: string;
+  projectId: string;
+  createdAt: number;
+  files: RecoveryBundleFileV1[];
+  journalReferences: string[];
+};
+
 export type TransactionJournalEventV1 = {
   schemaVersion: 1;
   eventId: string;
@@ -196,6 +303,11 @@ export type TransactionRuntimeActionV1 =
   | 'propose'
   | 'get'
   | 'list'
+  | 'getOperation'
+  | 'listOperations'
+  | 'applySelection'
+  | 'rejectSelection'
+  | 'exportRecoveryBundle'
   | 'preflight'
   | 'apply'
   | 'reject'
@@ -353,6 +465,59 @@ export function parseAndValidateSuccessReceipt(
   transaction: EditTransactionV1,
   expectedAfterSha256: string
 ): ApplyEditBatchReceiptV1 {
+  return parseAndValidateBatchSuccessReceipt(
+    raw,
+    request,
+    [transaction],
+    expectedAfterSha256
+  );
+}
+
+export function parseAndValidateBatchSuccessReceipt(
+  raw: unknown,
+  request: ApplyEditBatchRequestV1,
+  transactions: EditTransactionV1[],
+  expectedAfterSha256: string
+): ApplyEditBatchReceiptV1 {
+  const receipt = parseAndValidateRequestSuccessReceipt(
+    raw,
+    request,
+    expectedAfterSha256
+  );
+  const transactionById = new Map(
+    transactions.map((transaction) => [transaction.id, transaction])
+  );
+  if (
+    transactionById.size !== request.changes.length ||
+    request.changes.some((change) => !transactionById.has(change.transactionId))
+  ) {
+    throw new TransactionError(
+      'APPLY_FAILED',
+      'Receipt transaction membership mismatch'
+    );
+  }
+  for (const expectedChange of request.changes) {
+    const transaction = transactionById.get(expectedChange.transactionId)!;
+    if (
+      transaction.target.from !== expectedChange.from ||
+      transaction.target.to !== expectedChange.to ||
+      transaction.expectedText !== expectedChange.expectedText ||
+      transaction.replacementText !== expectedChange.replacementText
+    ) {
+      throw new TransactionError(
+        'APPLY_FAILED',
+        'Receipt transaction target mismatch'
+      );
+    }
+  }
+  return receipt;
+}
+
+export function parseAndValidateRequestSuccessReceipt(
+  raw: unknown,
+  request: ApplyEditBatchRequestV1,
+  expectedAfterSha256: string
+): ApplyEditBatchReceiptV1 {
   const source = requireObject(raw);
   if (source.schemaVersion !== 1 || source.protocolVersion !== 1) {
     throw new TransactionError('INVALID_REQUEST', 'Invalid receipt protocol');
@@ -410,7 +575,6 @@ export function parseAndValidateSuccessReceipt(
     const newText = change.newText;
     if (
       transactionId !== expectedChange.transactionId ||
-      transactionId !== transaction.id ||
       from !== expectedChange.from ||
       to !== expectedChange.to ||
       oldText !== expectedChange.expectedText ||
@@ -418,12 +582,25 @@ export function parseAndValidateSuccessReceipt(
     ) {
       throw new TransactionError('APPLY_FAILED', 'Receipt change mismatch');
     }
+    const resultFrom = change.resultFrom;
+    const resultTo = change.resultTo;
+    const resultRange =
+      Number.isInteger(resultFrom) &&
+      Number.isInteger(resultTo) &&
+      (resultFrom as number) >= 0 &&
+      (resultTo as number) >= (resultFrom as number)
+        ? {
+            resultFrom: resultFrom as number,
+            resultTo: resultTo as number,
+          }
+        : {};
     appliedChanges.push({
       transactionId: expectedChange.transactionId,
       from: expectedChange.from,
       to: expectedChange.to,
       oldText: expectedChange.expectedText,
       newText: expectedChange.replacementText,
+      ...resultRange,
     });
   }
   return {
@@ -495,6 +672,41 @@ export function parseRevisionScopedPayload(payload: unknown): {
     projectId: requireString(source, 'projectId'),
     id: requireString(source, 'id'),
     expectedRevision: expectedRevision as number,
+  };
+}
+
+export function parseSelectionPayload(payload: unknown): {
+  projectId: string;
+  selectionId: string;
+  members: Array<{ id: string; expectedRevision: number }>;
+} {
+  const source = requireObject(payload);
+  const rawMembers = source.members;
+  if (!Array.isArray(rawMembers) || rawMembers.length === 0) {
+    throw new TransactionError('INVALID_REQUEST', 'Selection cannot be empty');
+  }
+  const seen = new Set<string>();
+  const members = rawMembers.map((raw) => {
+    const member = requireObject(raw);
+    const id = requireString(member, 'id');
+    const expectedRevision = member.expectedRevision;
+    if (
+      !Number.isInteger(expectedRevision) ||
+      (expectedRevision as number) < 0 ||
+      seen.has(id)
+    ) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Selection contains an invalid or duplicate transaction'
+      );
+    }
+    seen.add(id);
+    return { id, expectedRevision: expectedRevision as number };
+  });
+  return {
+    projectId: requireString(source, 'projectId'),
+    selectionId: requireString(source, 'selectionId'),
+    members,
   };
 }
 

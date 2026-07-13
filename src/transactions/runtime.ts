@@ -6,14 +6,18 @@ import {
   parseProjectScopedIdPayload,
   parseProposePayload,
   parseRevisionScopedPayload,
+  parseSelectionPayload,
   type ApplyEditBatchReceiptV1,
   type ApplyEditBatchRequestV1,
+  type DurableFileBatchV1,
+  type EditOperationV1,
   type EditTransactionV1,
   type TransactionRuntimeContext,
   type TransactionRuntimeRequestV1,
   type TransactionRuntimeResponseV1,
 } from './contracts';
 import type { TransactionService } from './transactionService';
+import type { FileAtomicBatchPlanV1, FileBatchSnapshotV1 } from './fileBatch';
 
 export type TransactionRuntimeDependencies = {
   service: TransactionService;
@@ -25,6 +29,14 @@ export type TransactionRuntimeDependencies = {
     request: ApplyEditBatchRequestV1,
     context: TransactionRuntimeContext
   ) => Promise<ApplyEditBatchReceiptV1>;
+  preflightFileBatch: (
+    request: ApplyEditBatchRequestV1,
+    context: TransactionRuntimeContext
+  ) => Promise<FileAtomicBatchPlanV1>;
+  readFile: (
+    batch: DurableFileBatchV1,
+    context: TransactionRuntimeContext
+  ) => Promise<FileBatchSnapshotV1>;
   readFileSha256: (
     transaction: EditTransactionV1,
     context: TransactionRuntimeContext
@@ -115,6 +127,77 @@ export function createTransactionRuntimeHandler(
           const query = parseListPayload(payload);
           enforceRuntimeProjectScope(query.projectId, context);
           result = await dependencies.service.list(query);
+          break;
+        }
+        case 'getOperation': {
+          const scoped = parseProjectScopedIdPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.getOperation(
+            scoped.projectId,
+            scoped.id
+          );
+          break;
+        }
+        case 'listOperations': {
+          const projectId = stringField(payload, 'projectId');
+          enforceRuntimeProjectScope(projectId, context);
+          result = await dependencies.service.listOperations(projectId);
+          break;
+        }
+        case 'applySelection': {
+          const selection = parseSelectionPayload(payload);
+          enforceRuntimeProjectScope(selection.projectId, context);
+          result = await dependencies.service.applySelection(selection, {
+            preflightFile: (batchRequest) =>
+              dependencies.preflightFileBatch(batchRequest, context),
+            dispatchFile: (batchRequest) =>
+              dependencies.dispatchApply(batchRequest, context),
+            readFile: (batch) => dependencies.readFile(batch, context),
+          });
+          break;
+        }
+        case 'rejectSelection': {
+          const selection = parseSelectionPayload(payload);
+          enforceRuntimeProjectScope(selection.projectId, context);
+          const rejected: EditTransactionV1[] = [];
+          for (const member of selection.members) {
+            let transaction = await dependencies.service.get(
+              selection.projectId,
+              member.id
+            );
+            if (!transaction) {
+              throw new TransactionError(
+                'INVALID_REQUEST',
+                `Unknown transaction ${member.id}`
+              );
+            }
+            if (transaction.state === 'rejected') {
+              rejected.push(transaction);
+              continue;
+            }
+            if (transaction.revision !== member.expectedRevision) {
+              throw new TransactionError(
+                'STALE_REVISION',
+                `Expected revision ${member.expectedRevision}, found ${transaction.revision}`
+              );
+            }
+            transaction = await dependencies.service.reject(
+              selection.projectId,
+              member.id,
+              member.expectedRevision
+            );
+            rejected.push(transaction);
+          }
+          result = rejected;
+          break;
+        }
+        case 'exportRecoveryBundle': {
+          const scoped = parseProjectScopedIdPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.exportRecoveryBundle(
+            scoped.projectId,
+            scoped.id
+          );
           break;
         }
         case 'preflight': {

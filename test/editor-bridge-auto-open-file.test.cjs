@@ -9,7 +9,7 @@ test('Main editor bridge activates the exact recorded file before batch validati
   assert.match(contents, /async function activateExactFile/);
   assert.match(
     contents,
-    /async function executeEditBatch[\s\S]*await activateExactFile\(request\.filePath, request\.fileId\)[\s\S]*validateDurableReplacementBatch/
+    /async function executeEditBatch[\s\S]*await activateExactFile\(request\.filePath, request\.fileId\)[\s\S]*planFileAtomicBatch/
   );
   assert.match(contents, /await restoreExactFile\(originalFile\)/);
   assert.doesNotMatch(contents, /detail\.kind === 'replaceInFile'/);

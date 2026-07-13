@@ -351,6 +351,8 @@ test('recorded insertion ignores later cursor/file changes, restores the file, a
       to: request.changes[0].to,
       oldText: '',
       newText: 'INSERTED ',
+      resultFrom: request.changes[0].from,
+      resultTo: request.changes[0].from + 'INSERTED '.length,
     },
   ]);
 
@@ -572,6 +574,9 @@ test('recorded replacement ignores later selection/file changes, restores the fi
       to: request.changes[0].to,
       oldText: request.changes[0].expectedText,
       newText: request.changes[0].replacementText,
+      resultFrom: request.changes[0].from,
+      resultTo:
+        request.changes[0].from + request.changes[0].replacementText.length,
     },
   ]);
   expect(await sendBatch(serviceWorker, request)).toEqual(receipt);

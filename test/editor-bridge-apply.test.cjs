@@ -8,7 +8,8 @@ test('Main editor bridge supports acknowledged batch request/response', () => {
   const contents = fs.readFileSync(bridgePath, 'utf8');
   assert.match(contents, /ageaf:editor:batch:request/);
   assert.match(contents, /ageaf:editor:batch:response/);
-  assert.match(contents, /validateDurableReplacementBatch/);
+  assert.match(contents, /planFileAtomicBatch/);
+  assert.match(contents, /changes: validation\.dispatchChanges/);
   assert.match(contents, /executeEditBatch/);
   assert.doesNotMatch(contents, /ageaf:editor:apply:request/);
 });

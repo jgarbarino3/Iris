@@ -2,10 +2,13 @@ import { getContentAfterCursor, getContentBeforeCursor, getCmView } from '../hel
 import { MAX_LENGTH_AFTER_CURSOR, MAX_LENGTH_BEFORE_CURSOR } from '../../constants';
 import {
   canonicalFilePath,
-  validateAnchoredInsertionBatch,
+  sha256Text,
   type EditorFileSnapshotV1,
 } from '../../transactions/anchoredInsertion';
-import { validateDurableReplacementBatch } from '../../transactions/durableReplacement';
+import {
+  planFileAtomicBatch,
+  projectAppliedChanges,
+} from '../../transactions/fileBatch';
 import {
   TransactionError,
   sanitizeFailure,
@@ -777,26 +780,34 @@ async function executeEditBatch(
 
     const view = getTrackedCmView();
     const content = view.state.sliceDoc(0, view.state.doc.length);
+    const currentSha256 = await sha256Text(content);
+    if (
+      request.expectedResultSha256 &&
+      currentSha256 === request.expectedResultSha256.toLowerCase()
+    ) {
+      return {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        requestId: request.requestId,
+        batchId: request.batchId,
+        success: true,
+        beforeSha256: request.expectedBaseSha256.toLowerCase(),
+        afterSha256: currentSha256,
+        appliedChanges: projectAppliedChanges(request.changes),
+      };
+    }
     const snapshot: EditorFileSnapshotV1 = {
       projectId: request.projectId,
       filePath: activeFile.filePath,
       ...(activeFile.fileId ? { fileId: activeFile.fileId } : {}),
       content,
     };
-    const change = request.changes[0]!;
-    const validation =
-      change.from === change.to && change.expectedText === ''
-        ? await validateAnchoredInsertionBatch(request, snapshot)
-        : await validateDurableReplacementBatch(request, snapshot);
+    const validation = await planFileAtomicBatch(request, snapshot);
 
     reviewChangeInProgress = true;
     try {
       view.dispatch({
-        changes: {
-          from: change.from,
-          to: change.to,
-          insert: change.replacementText,
-        },
+        changes: validation.dispatchChanges,
       });
       dispatched = true;
     } finally {
@@ -804,7 +815,11 @@ async function executeEditBatch(
     }
 
     const actualAfter = view.state.sliceDoc(0, view.state.doc.length);
-    if (actualAfter !== validation.afterContent) {
+    const actualAfterSha256 = await sha256Text(actualAfter);
+    if (
+      actualAfter !== validation.afterContent ||
+      actualAfterSha256 !== validation.afterSha256
+    ) {
       throw new TransactionError(
         'RECOVERY_REQUIRED',
         'Editor content diverged after dispatch'
@@ -819,12 +834,15 @@ async function executeEditBatch(
       success: true,
       beforeSha256: validation.beforeSha256,
       afterSha256: validation.afterSha256,
-      appliedChanges: [validation.appliedChange],
+      appliedChanges: validation.appliedChanges,
     };
   } catch (error) {
-    const code = dispatched
-      ? 'APPLY_TIMEOUT'
-      : error instanceof TransactionError
+    const code =
+      error instanceof TransactionError && error.code === 'RECOVERY_REQUIRED'
+        ? 'RECOVERY_REQUIRED'
+        : dispatched
+          ? 'APPLY_TIMEOUT'
+          : error instanceof TransactionError
         ? error.code
         : sanitizeFailureCode(
             error && typeof error === 'object' && 'code' in error

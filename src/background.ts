@@ -4,6 +4,7 @@ import type { NativeHostRequest, NativeHostResponse } from './iso/messaging/nati
 import type {
   ApplyEditBatchReceiptV1,
   ApplyEditBatchRequestV1,
+  DurableFileBatchV1,
   EditTransactionV1,
   TransactionRuntimeContext,
   TransactionRuntimeRequestV1,
@@ -17,6 +18,10 @@ import {
 import { IndexedDbTransactionRepository } from './transactions/indexedDbRepository';
 import { createTransactionRuntimeHandler } from './transactions/runtime';
 import { TransactionService } from './transactions/transactionService';
+import type {
+  FileAtomicBatchPlanV1,
+  FileBatchSnapshotV1,
+} from './transactions/fileBatch';
 
 const NATIVE_HOST_NAME = 'com.ageaf.host';
 let nativePort: chrome.runtime.Port | null = null;
@@ -101,6 +106,73 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
       type: 'iris:transaction:apply-batch',
       request,
     }),
+  preflightFileBatch: async (
+    request: ApplyEditBatchRequestV1,
+    context
+  ): Promise<FileAtomicBatchPlanV1> => {
+    const response = await sendToTab<{
+      ok?: boolean;
+      plan?: FileAtomicBatchPlanV1;
+      error?: { code?: unknown };
+    }>(context.tabId, {
+      type: 'iris:transaction:preflight-batch',
+      request,
+    });
+    const plan = response?.plan;
+    if (
+      response?.ok !== true ||
+      !plan ||
+      typeof plan.beforeContent !== 'string' ||
+      typeof plan.afterContent !== 'string' ||
+      !isSha256(plan.beforeSha256) ||
+      !isSha256(plan.afterSha256) ||
+      !Array.isArray(plan.dispatchChanges) ||
+      !Array.isArray(plan.appliedChanges)
+    ) {
+      throw new TransactionError(
+        sanitizeFailureCode(response?.error?.code),
+        'File batch preflight failed'
+      );
+    }
+    return plan;
+  },
+  readFile: async (
+    batch: DurableFileBatchV1,
+    context
+  ): Promise<FileBatchSnapshotV1> => {
+    const response = await sendToTab<{
+      ok?: boolean;
+      projectId?: string;
+      filePath?: string;
+      fileId?: string;
+      content?: string;
+      error?: { code?: unknown };
+    }>(context.tabId, {
+      type: 'iris:transaction:read-file',
+      target: {
+        projectId: batch.projectId,
+        filePath: batch.filePath,
+        ...(batch.fileId ? { fileId: batch.fileId } : {}),
+      },
+    });
+    if (
+      response?.ok !== true ||
+      response.projectId !== batch.projectId ||
+      typeof response.filePath !== 'string' ||
+      typeof response.content !== 'string'
+    ) {
+      throw new TransactionError(
+        sanitizeFailureCode(response?.error?.code),
+        'Editor file observation unavailable'
+      );
+    }
+    return {
+      projectId: response.projectId,
+      filePath: response.filePath,
+      ...(response.fileId ? { fileId: response.fileId } : {}),
+      content: response.content,
+    };
+  },
   readFileSha256: async (transaction: EditTransactionV1, context) => {
     if (transaction.state === 'applying' && transaction.pendingApply) {
       const replay = await sendToTab<ApplyEditBatchReceiptV1>(context.tabId, {
@@ -189,15 +261,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       );
       return true;
     }
-    const context: TransactionRuntimeContext = {
-      boundProjectId: null,
-      source: 'test-harness',
-      tabId: sender.tab?.id ?? null,
-    };
-    void handleTransactionRequest(
-      message.request as TransactionRuntimeRequestV1,
-      context
-    ).then(sendResponse);
+    void (async () => {
+      let tabId = sender.tab?.id ?? null;
+      if (Number.isInteger(message.editorTabId)) {
+        const editorTabId = message.editorTabId as number;
+        const editorIdentity = await sendToTab<{ projectId?: string }>(
+          editorTabId,
+          { type: 'iris:transaction:test-project-id' }
+        );
+        const editorProjectId = editorIdentity?.projectId ?? null;
+        const payloadProjectId = message.request?.payload?.projectId;
+        if (
+          !editorProjectId ||
+          (typeof payloadProjectId === 'string' &&
+            payloadProjectId !== editorProjectId)
+        ) {
+          return rejectedRuntimeResponse(
+            typeof message.request?.requestId === 'string'
+              ? message.request.requestId
+              : 'rejected',
+            'WRONG_PROJECT',
+            'Deterministic editor fixture project mismatch'
+          );
+        }
+        tabId = editorTabId;
+      }
+      const context: TransactionRuntimeContext = {
+        boundProjectId: null,
+        source: 'test-harness',
+        tabId,
+      };
+      return handleTransactionRequest(
+        message.request as TransactionRuntimeRequestV1,
+        context
+      );
+    })().then(sendResponse, () =>
+      sendResponse(
+        rejectedRuntimeResponse(
+          typeof message.request?.requestId === 'string'
+            ? message.request.requestId
+            : 'rejected',
+          'INVALID_REQUEST',
+          'Deterministic runtime harness failed'
+        )
+      )
+    );
     return true;
   }
   if (message?.type === 'iris:transaction-runtime') {

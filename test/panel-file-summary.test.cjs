@@ -27,12 +27,18 @@ test('Panel file summary only aggregates pending hunks', () => {
   assert.match(contents, /if \(status !== 'pending'\) continue;/);
 });
 
-test('Panel extracts acceptSinglePatch and uses it from single and bulk accept paths', () => {
+test('Panel routes single and bulk acceptance through the explicit subset authority', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
   assert.match(contents, /const acceptSinglePatch = async \(/);
-  assert.match(contents, /await acceptSinglePatch\(messageId,\s*patchReview,\s*overrideText\)/);
-  assert.match(contents, /await acceptSinglePatch\(latest\.id,\s*latest\.patchReview\)/);
+  assert.match(
+    contents,
+    /acceptPatchSubset\(\[\{ messageId, patchReview, overrideText \}\]\)/
+  );
+  assert.match(
+    contents,
+    /const onBulkAcceptAll = async \(\) => \{[\s\S]*?await acceptPatchSubset\(selections\);/
+  );
 });
 
 test('Panel defines bulk accept and bulk reject handlers', () => {
@@ -57,10 +63,10 @@ test('Panel anchors summary card between chat and runtime and only when pending 
   const contents = read('src/iso/panel/Panel.tsx');
 
   assert.match(contents, /const showSummaryCard = totalPending > 0;/);
-  assert.match(
-    contents,
-    /<\/div>\s*\{showSummaryCard \? \(\s*<FileChangeSummaryCard[\s\S]*?\) : null\}\s*<div class="ageaf-runtime">/
-  );
+  const summaryIndex = contents.indexOf('{showSummaryCard ? (');
+  const runtimeIndex = contents.indexOf('<div class="ageaf-runtime">');
+  assert.ok(summaryIndex > 0);
+  assert.ok(runtimeIndex > summaryIndex);
 });
 
 test('central editor adapter exposes bounded navigateToFile bridge call', () => {
@@ -110,13 +116,17 @@ test('Panel memoizes grouped patch maps from messages', () => {
   assert.match(contents, /const \{ messageById, fileGroupMap, fileGroupRole \} = useMemo\(/);
 });
 
-test('Panel per-file accept path builds an O\\(1\\) lookup map from messagesRef', () => {
+test('Panel per-file accept path submits one explicit durable subset', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
+  assert.match(contents, /const acceptPatchSubset = async/);
+  assert.match(contents, /transactionRpc<EditOperationV1>\(\s*'applySelection'/);
   assert.match(
     contents,
-    /const currentById = new Map\(messagesRef\.current\.map\(\(entry\) => \[entry\.id, entry\]\)\);/
+    /const onAcceptFilePatches = async \(fileKey: string\)[\s\S]*?await acceptPatchSubset\(selections\);/
   );
+  assert.doesNotMatch(contents, /setTimeout\(resolve, 120\)/);
+  assert.doesNotMatch(contents, /Continue processing remaining hunks/);
 });
 
 test('GroupedPatchReviewCard derives status counts in a single pass and guards empty hunks', () => {

@@ -50,6 +50,11 @@ export type StoredDocumentAttachment = {
 };
 
 export type StoredPatchReviewStatus = 'pending' | 'accepted' | 'rejected';
+export type StoredPatchReviewOutcome =
+  | 'preflight-rejected'
+  | 'file-batch-failed'
+  | 'compensated-failure'
+  | 'recovery-required';
 
 export type StoredPatchReview =
   | {
@@ -67,6 +72,8 @@ export type StoredPatchReview =
     transactionRevision?: number;
     projectId?: string;
     transactionError?: string;
+    transactionOutcome?: StoredPatchReviewOutcome;
+    operationId?: string;
   }
   | {
     kind: 'insertAtCursor';
@@ -77,6 +84,8 @@ export type StoredPatchReview =
     transactionRevision?: number;
     projectId?: string;
     transactionError?: string;
+    transactionOutcome?: StoredPatchReviewOutcome;
+    operationId?: string;
   }
   | {
     kind: 'replaceRangeInFile';
@@ -92,6 +101,8 @@ export type StoredPatchReview =
     transactionRevision?: number;
     projectId?: string;
     transactionError?: string;
+    transactionOutcome?: StoredPatchReviewOutcome;
+    operationId?: string;
   };
 
 export type StoredMessage = {
@@ -334,10 +345,25 @@ function normalizePatchReviewStatus(raw: any): StoredPatchReviewStatus | undefin
   return undefined;
 }
 
+function normalizePatchReviewOutcome(
+  raw: any
+): StoredPatchReviewOutcome | undefined {
+  if (
+    raw === 'preflight-rejected' ||
+    raw === 'file-batch-failed' ||
+    raw === 'compensated-failure' ||
+    raw === 'recovery-required'
+  ) {
+    return raw;
+  }
+  return undefined;
+}
+
 function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
   if (!raw || typeof raw !== 'object') return null;
   const kind = raw.kind;
   const status = normalizePatchReviewStatus(raw.status);
+  const transactionOutcome = normalizePatchReviewOutcome(raw.transactionOutcome);
   const hasAnimatedRaw = raw.hasAnimated ?? raw.has_animated;
   const hasAnimated = typeof hasAnimatedRaw === 'boolean' ? hasAnimatedRaw : undefined;
 
@@ -387,6 +413,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.transactionError === 'string'
         ? { transactionError: raw.transactionError }
         : {}),
+      ...(transactionOutcome ? { transactionOutcome } : {}),
+      ...(typeof raw.operationId === 'string'
+        ? { operationId: raw.operationId }
+        : {}),
     };
   }
 
@@ -409,6 +439,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
         : {}),
       ...(typeof raw.transactionError === 'string'
         ? { transactionError: raw.transactionError }
+        : {}),
+      ...(transactionOutcome ? { transactionOutcome } : {}),
+      ...(typeof raw.operationId === 'string'
+        ? { operationId: raw.operationId }
         : {}),
     };
   }
@@ -453,6 +487,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
         : {}),
       ...(typeof raw.transactionError === 'string'
         ? { transactionError: raw.transactionError }
+        : {}),
+      ...(transactionOutcome ? { transactionOutcome } : {}),
+      ...(typeof raw.operationId === 'string'
+        ? { operationId: raw.operationId }
         : {}),
     };
   }
