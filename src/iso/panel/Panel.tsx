@@ -12,6 +12,7 @@ import {
   detectContextIntent,
 } from './contextPolicy';
 import { PatchReviewCard, CopyIcon, CheckIcon } from './PatchReviewCard';
+import { RecentHistoryPanel } from './RecentHistoryPanel';
 import {
   GroupedPatchReviewCard,
   type HunkEntry,
@@ -50,7 +51,11 @@ import { buildDurableReplacementProposal } from '../../transactions/durableRepla
 import type {
   EditOperationV1,
   EditTransactionV1,
+  ProjectHistoryExportV1,
   RecoveryBundleV1,
+  RecentHistoryEntryV1,
+  RecentHistoryV1,
+  RevertRelationshipV1,
   TransactionRuntimeActionV1,
   TransactionRuntimeResponseV1,
 } from '../../transactions/contracts';
@@ -1057,6 +1062,15 @@ const Panel = () => {
   >({});
   const [recoveryOperation, setRecoveryOperation] =
     useState<EditOperationV1 | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [recentHistory, setRecentHistory] = useState<RecentHistoryV1 | null>(
+    null
+  );
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyActionBusyId, setHistoryActionBusyId] = useState<string | null>(
+    null
+  );
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const pendingPatchFeedbackTargetRef = useRef<PatchFeedbackTarget | null>(
     null
   );
@@ -3005,6 +3019,32 @@ const Panel = () => {
             }
           );
         }
+        let relationshipMap: Map<string, EditTransactionV1> | undefined;
+        if (
+          authoritative.revertedByTransactionId ||
+          authoritative.revertsTransactionId
+        ) {
+          const relationship = await transactionRpc<RevertRelationshipV1>(
+            'getRevertRelationship',
+            {
+              projectId: authoritative.projectId,
+              id: authoritative.id,
+            }
+          );
+          relationshipMap = new Map([
+            [relationship.original.id, relationship.original],
+            ...(relationship.inverse
+              ? ([[relationship.inverse.id, relationship.inverse]] as Array<
+                  [string, EditTransactionV1]
+                >)
+              : []),
+          ]);
+          if (authoritative.revertsTransactionId && relationship.inverse) {
+            authoritative = relationship.inverse;
+          } else {
+            authoritative = relationship.original;
+          }
+        }
 
         setMessages((previous) =>
           previous.map((entry) => {
@@ -3015,7 +3055,9 @@ const Panel = () => {
               ...entry,
               patchReview: projectTransactionPatchReview(
                 authoritative,
-                current
+                current,
+                undefined,
+                relationshipMap
               ),
             };
           })
@@ -5065,9 +5107,37 @@ const Panel = () => {
         status === 'pending' &&
         !busy &&
         patchReview.projection?.readOnly !== true;
+      const revertEligibility = patchReview.projection?.revertEligibility;
+      const canRevert =
+        status === 'accepted' &&
+        !busy &&
+        revertEligibility?.eligible === true &&
+        revertEligibility.disposition === 'create';
+      const revertStatus =
+        status !== 'accepted'
+          ? null
+          : patchReview.projection?.inverseFailureCode === 'RECOVERY_REQUIRED'
+            ? 'Inverse recovery required'
+            : patchReview.projection?.inverseState === 'conflicted'
+              ? 'Inverse conflicted'
+              : patchReview.projection?.inverseState === 'failed'
+                ? 'Inverse failed'
+                : patchReview.projection?.inverseState === 'applied'
+                  ? 'Reverted'
+                  : patchReview.projection?.inverseState
+                    ? 'Inverse proposed · review required'
+                    : revertEligibility?.reason === 'ALREADY_REVERTED'
+                      ? 'Reverted'
+                      : revertEligibility?.reason === 'RELATIONSHIP_INCOMPLETE' ||
+                          revertEligibility?.reason === 'RELATIONSHIP_CYCLE'
+                        ? 'Revert unavailable · relationship invalid'
+                        : null;
       if (
         patchReview.kind === 'replaceRangeInFile' &&
-        !patchReview.conflictPreview
+        !patchReview.conflictPreview &&
+        status === 'pending' &&
+        !patchReview.revertsTransactionId &&
+        !patchReview.inverseTransactionId
       ) {
         const groupRole = fileGroupRole.get(message.id);
         if (groupRole === 'absorbed') return null;
@@ -5140,6 +5210,9 @@ const Panel = () => {
           onAccept={() => void onAcceptPatchReviewMessage(message.id)}
           onFeedback={() => onFeedbackPatchReviewMessage(message.id)}
           onReject={() => onRejectPatchReviewMessage(message.id)}
+          onRevert={() => void onRevertPatchReviewMessage(message.id)}
+          canRevert={canRevert}
+          revertStatus={revertStatus}
           markAnimated={() =>
             updatePatchReviewMessage(message.id, (next) => ({
               ...(next as any),
@@ -9840,6 +9913,7 @@ const Panel = () => {
 
       if (operation.state === 'applied') {
         const appliedById = new Map<string, EditTransactionV1>();
+        const completedRevertRelationships: RevertRelationshipV1[] = [];
         for (const entry of prepared) {
           const transaction = await transactionRpc<EditTransactionV1 | null>(
             'get',
@@ -9855,21 +9929,28 @@ const Panel = () => {
             );
           }
           appliedById.set(transaction.id, transaction);
+          if (transaction.revertsTransactionId) {
+            completedRevertRelationships.push(
+              await transactionRpc<RevertRelationshipV1>(
+                'getRevertRelationship',
+                {
+                  projectId: transaction.projectId,
+                  id: transaction.id,
+                }
+              )
+            );
+          }
         }
         for (const entry of prepared) {
           const transaction = appliedById.get(entry.transaction.id)!;
           updatePatchReviewMessage(entry.messageId, (current) => ({
-            ...current,
+            ...projectTransactionPatchReview(transaction, current, operation),
             text: entry.nextText,
-            status: 'accepted',
-            transactionId: transaction.id,
-            transactionRevision: transaction.revision,
-            projectId: transaction.projectId,
-            transactionError: undefined,
-            transactionOutcome: undefined,
-            operationId: operation.id,
           }));
           clearPatchErrorForMessage(entry.messageId);
+        }
+        for (const relationship of completedRevertRelationships) {
+          projectRevertRelationship(relationship, operation);
         }
         return true;
       }
@@ -10114,6 +10195,240 @@ const Panel = () => {
       }));
     } finally {
       setBulkActionBusy(false);
+    }
+  };
+
+  const loadRecentHistory = async (): Promise<RecentHistoryV1 | null> => {
+    const projectId =
+      chatProjectIdRef.current ??
+      getOverleafProjectIdFromPathname(window.location.pathname);
+    if (!projectId) {
+      setHistoryError('The active Overleaf project is unavailable.');
+      return null;
+    }
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const history = await transactionRpc<RecentHistoryV1>(
+        'getRecentHistory',
+        { projectId, limit: 50 }
+      );
+      setRecentHistory(history);
+      return history;
+    } catch (error) {
+      setHistoryError(
+        error instanceof Error ? error.message : 'Recent history is unavailable.'
+      );
+      return null;
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const focusTransactionCard = (transactionId: string) => {
+    setHistoryOpen(false);
+    window.requestAnimationFrame(() => {
+      const escaped =
+        typeof CSS !== 'undefined' && CSS.escape
+          ? CSS.escape(transactionId)
+          : transactionId.replace(/["\\]/g, '\\$&');
+      const card = document.querySelector<HTMLElement>(
+        `[data-transaction-id="${escaped}"]`
+      );
+      card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  };
+
+  const projectRevertRelationship = (
+    relationship: RevertRelationshipV1,
+    operation?: EditOperationV1
+  ): void => {
+    const transactionMap = new Map<string, EditTransactionV1>([
+      [relationship.original.id, relationship.original],
+      ...(relationship.inverse
+        ? ([[relationship.inverse.id, relationship.inverse]] as Array<
+            [string, EditTransactionV1]
+          >)
+        : []),
+    ]);
+    setMessages((previous) => {
+      let originalProjected = false;
+      let inverseProjected = false;
+      const next = previous.map((entry) => {
+        const review = entry.patchReview;
+        if (!review?.transactionId) return entry;
+        if (review.transactionId === relationship.original.id) {
+          originalProjected = true;
+          return {
+            ...entry,
+            patchReview: projectTransactionPatchReview(
+              relationship.original,
+              review,
+              operation?.transactionIds.includes(relationship.original.id)
+                ? operation
+                : undefined,
+              transactionMap
+            ),
+          };
+        }
+        if (
+          relationship.inverse &&
+          review.transactionId === relationship.inverse.id
+        ) {
+          inverseProjected = true;
+          return {
+            ...entry,
+            patchReview: projectTransactionPatchReview(
+              relationship.inverse,
+              review,
+              operation?.transactionIds.includes(relationship.inverse.id)
+                ? operation
+                : undefined,
+              transactionMap
+            ),
+          };
+        }
+        return entry;
+      });
+      if (!originalProjected) {
+        next.push(
+          createMessage({
+            role: 'system',
+            content: '',
+            patchReview: projectTransactionPatchReview(
+              relationship.original,
+              undefined,
+              operation?.transactionIds.includes(relationship.original.id)
+                ? operation
+                : undefined,
+              transactionMap
+            ),
+          })
+        );
+      }
+      if (relationship.inverse && !inverseProjected) {
+        next.push(
+          createMessage({
+            role: 'system',
+            content: '',
+            patchReview: projectTransactionPatchReview(
+              relationship.inverse,
+              undefined,
+              operation?.transactionIds.includes(relationship.inverse.id)
+                ? operation
+                : undefined,
+              transactionMap
+            ),
+          })
+        );
+      }
+      return next;
+    });
+  };
+
+  const createOrFocusRevert = async (options: {
+    transactionId: string;
+    projectId: string;
+    expectedRevision: number;
+    messageId?: string;
+  }) => {
+    if (historyActionBusyId || patchActionBusyId || bulkActionBusy) return;
+    setHistoryActionBusyId(options.transactionId);
+    if (options.messageId) {
+      setPatchActionBusyId(options.messageId);
+      clearPatchErrorForMessage(options.messageId);
+    }
+    setHistoryError(null);
+    try {
+      const relationship = await transactionRpc<RevertRelationshipV1>(
+        'createRevert',
+        {
+          projectId: options.projectId,
+          id: options.transactionId,
+          expectedRevision: options.expectedRevision,
+        }
+      );
+      projectRevertRelationship(relationship);
+      await loadRecentHistory();
+      if (relationship.inverse) {
+        focusTransactionCard(relationship.inverse.id);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to create inverse.';
+      setHistoryError(message);
+      if (options.messageId) {
+        setPatchActionErrors((previous) => ({
+          ...previous,
+          [options.messageId!]: message,
+        }));
+      }
+    } finally {
+      setHistoryActionBusyId(null);
+      if (options.messageId) setPatchActionBusyId(null);
+    }
+  };
+
+  const onRevertPatchReviewMessage = async (messageId: string) => {
+    const review = messagesRef.current.find(
+      (entry) => entry.id === messageId
+    )?.patchReview;
+    if (!review) return;
+    try {
+      const transaction = await getDurableReviewTransaction(review);
+      await createOrFocusRevert({
+        transactionId: transaction.id,
+        projectId: transaction.projectId,
+        expectedRevision: transaction.revision,
+        messageId,
+      });
+    } catch (error) {
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        [messageId]: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  };
+
+  const onRevertHistoryEntry = async (entry: RecentHistoryEntryV1) => {
+    if (!entry.safelyRevertible) return;
+    await createOrFocusRevert({
+      transactionId: entry.transactionId,
+      projectId: entry.projectId,
+      expectedRevision: entry.revision,
+    });
+  };
+
+  const onExportHistory = async () => {
+    const projectId =
+      recentHistory?.projectId ??
+      chatProjectIdRef.current ??
+      getOverleafProjectIdFromPathname(window.location.pathname);
+    if (!projectId) return;
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const exported = await transactionRpc<ProjectHistoryExportV1>(
+        'exportHistory',
+        { projectId }
+      );
+      const blob = new Blob([`${JSON.stringify(exported, null, 2)}\n`], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `iris-history-${projectId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setHistoryError(
+        error instanceof Error ? error.message : 'History export failed.'
+      );
+    } finally {
+      setHistoryBusy(false);
     }
   };
 
@@ -10943,6 +11258,19 @@ const Panel = () => {
                 <span class="ageaf-provider__label">{providerDisplay.label}</span>
               </div>
               <button
+                class="ageaf-panel__history-toggle"
+                type="button"
+                aria-label="Open recent edit history"
+                aria-expanded={historyOpen}
+                onClick={() => {
+                  const nextOpen = !historyOpen;
+                  setHistoryOpen(nextOpen);
+                  if (nextOpen) void loadRecentHistory();
+                }}
+              >
+                History
+              </button>
+              <button
                 class="ageaf-panel__theme-toggle"
                 type="button"
                 onClick={() => setIsLightMode(!isLightMode)}
@@ -10997,6 +11325,20 @@ const Panel = () => {
               {TIPS[tipIndex]}
             </div>
           </header>
+        ) : null}
+        {hasSessions && historyOpen ? (
+          <RecentHistoryPanel
+            history={recentHistory}
+            busy={historyBusy}
+            error={historyError}
+            actionBusyId={historyActionBusyId}
+            onClose={() => setHistoryOpen(false)}
+            onRefresh={() => void loadRecentHistory()}
+            onExport={() => void onExportHistory()}
+            onRevert={(entry) => void onRevertHistoryEntry(entry)}
+            onFindCard={focusTransactionCard}
+            onNavigateFile={onNavigateToFile}
+          />
         ) : null}
         <div class="ageaf-panel__body">
           {hasSessions ? (

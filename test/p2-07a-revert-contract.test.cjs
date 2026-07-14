@@ -44,7 +44,9 @@ test('P2-07A adds no native undo, fuzzy rollback, active-target fallback, or pan
     /nearest(?:Match|Occurrence)|fuzzy(?:Match|Rollback)/i
   );
   assert.doesNotMatch(source, /active(?:Cursor|Selection|File).*revert/i);
-  assert.doesNotMatch(panel, /createRevert|revertTransaction|dispatchRevert/);
+  assert.match(panel, /transactionRpc<RevertRelationshipV1>\(\s*'createRevert'/);
+  assert.doesNotMatch(panel, /dispatchRevert|revertTransaction|nativeUndo/);
+  assert.doesNotMatch(panel, /ageafBridge\.(?:replace|apply|dispatch).*Revert/i);
 });
 
 test('P2-07A source excludes protected files and destructive filesystem commands', () => {

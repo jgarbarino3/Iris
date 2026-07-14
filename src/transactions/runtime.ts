@@ -5,6 +5,7 @@ import {
   parsePreflightPayload,
   parseProjectScopedIdPayload,
   parseProposePayload,
+  parseRecentHistoryPayload,
   parseRevisionScopedPayload,
   parseSelectionPayload,
   type ApplyEditBatchReceiptV1,
@@ -183,6 +184,27 @@ export function createTransactionRuntimeHandler(
           const query = parseListPayload(payload);
           enforceRuntimeProjectScope(query.projectId, context);
           result = await dependencies.service.list(query);
+          break;
+        }
+        case 'getRecentHistory': {
+          const history = parseRecentHistoryPayload(payload);
+          enforceRuntimeProjectScope(history.projectId, context);
+          result = await dependencies.service.getRecentHistory(
+            history.projectId,
+            history.limit
+          );
+          break;
+        }
+        case 'exportHistory': {
+          const projectId = stringField(payload, 'projectId');
+          enforceRuntimeProjectScope(projectId, context);
+          result = await dependencies.service.exportHistory(projectId);
+          break;
+        }
+        case 'pruneHistory': {
+          const projectId = stringField(payload, 'projectId');
+          enforceRuntimeProjectScope(projectId, context);
+          result = await dependencies.service.pruneHistory(projectId);
           break;
         }
         case 'getOperation': {

@@ -11,6 +11,10 @@ import {
   composeIdempotencyKey,
   proposalFingerprintFromTransaction,
 } from './contracts';
+import {
+  planProjectHistoryPrune,
+  type ProjectHistoryPrunePlanV1,
+} from './retention';
 
 const DEFAULT_DATABASE_NAME = 'iris-edit-transactions';
 const TRANSACTIONS_STORE = 'transactions';
@@ -1010,6 +1014,49 @@ export class IndexedDbTransactionRepository {
     return values.sort((a, b) => a.revision - b.revision);
   }
 
+  async listProjectJournal(
+    projectId: string
+  ): Promise<TransactionJournalEventV1[]> {
+    const database = await this.open();
+    const transaction = database.transaction(JOURNAL_STORE, 'readonly');
+    const values = await requestResult(
+      transaction
+        .objectStore(JOURNAL_STORE)
+        .index('projectId')
+        .getAll(projectId) as IDBRequest<TransactionJournalEventV1[]>
+    );
+    await transactionDone(transaction);
+    return values.sort(
+      (left, right) =>
+        left.timestamp - right.timestamp ||
+        left.revision - right.revision ||
+        left.eventId.localeCompare(right.eventId)
+    );
+  }
+
+  async listProjectOperationJournal(
+    projectId: string
+  ): Promise<OperationJournalEventV1[]> {
+    const database = await this.open();
+    const transaction = database.transaction(
+      OPERATION_JOURNAL_STORE,
+      'readonly'
+    );
+    const values = await requestResult(
+      transaction
+        .objectStore(OPERATION_JOURNAL_STORE)
+        .index('projectId')
+        .getAll(projectId) as IDBRequest<OperationJournalEventV1[]>
+    );
+    await transactionDone(transaction);
+    return values.sort(
+      (left, right) =>
+        left.timestamp - right.timestamp ||
+        left.revision - right.revision ||
+        left.eventId.localeCompare(right.eventId)
+    );
+  }
+
   async compareAndSwap(
     id: string,
     expectedRevision: number,
@@ -1121,13 +1168,128 @@ export class IndexedDbTransactionRepository {
     return next.transactions.map((entry) => entry.transaction);
   }
 
-  async deleteDatabase(): Promise<void> {
+  async pruneProjectHistory(
+    projectId: string,
+    evaluatedAt: number
+  ): Promise<ProjectHistoryPrunePlanV1> {
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [
+        TRANSACTIONS_STORE,
+        JOURNAL_STORE,
+        IDEMPOTENCY_STORE,
+        OPERATIONS_STORE,
+        OPERATION_JOURNAL_STORE,
+        OPERATION_IDEMPOTENCY_STORE,
+      ],
+      'readwrite'
+    );
+    const transactionStore = idbTransaction.objectStore(TRANSACTIONS_STORE);
+    const journalStore = idbTransaction.objectStore(JOURNAL_STORE);
+    const idempotencyStore = idbTransaction.objectStore(IDEMPOTENCY_STORE);
+    const operationStore = idbTransaction.objectStore(OPERATIONS_STORE);
+    const operationJournalStore = idbTransaction.objectStore(
+      OPERATION_JOURNAL_STORE
+    );
+    const operationIdempotencyStore = idbTransaction.objectStore(
+      OPERATION_IDEMPOTENCY_STORE
+    );
+    try {
+      const transactions = await requestResult(
+        transactionStore.index('projectId').getAll(projectId) as IDBRequest<
+          EditTransactionV1[]
+        >
+      );
+      const operations = await requestResult(
+        operationStore.index('projectId').getAll(projectId) as IDBRequest<
+          EditOperationV1[]
+        >
+      );
+      const plan = planProjectHistoryPrune({
+        projectId,
+        transactions,
+        operations,
+        now: evaluatedAt,
+      });
+      const transactionIds = new Set(plan.prunedTransactionIds);
+      const operationIds = new Set(plan.prunedOperationIds);
+
+      if (transactionIds.size > 0) {
+        const journalEvents = await requestResult(
+          journalStore.index('projectId').getAll(projectId) as IDBRequest<
+            TransactionJournalEventV1[]
+          >
+        );
+        const idempotencyRecords = await requestResult(
+          idempotencyStore.index('projectId').getAll(projectId) as IDBRequest<
+            IdempotencyRecord[]
+          >
+        );
+        for (const id of transactionIds) transactionStore.delete(id);
+        for (const event of journalEvents) {
+          if (transactionIds.has(event.transactionId)) {
+            journalStore.delete(event.eventId);
+          }
+        }
+        for (const record of idempotencyRecords) {
+          if (transactionIds.has(record.transactionId)) {
+            idempotencyStore.delete(record.key);
+          }
+        }
+      }
+
+      if (operationIds.size > 0) {
+        const journalEvents = await requestResult(
+          operationJournalStore
+            .index('projectId')
+            .getAll(projectId) as IDBRequest<OperationJournalEventV1[]>
+        );
+        const idempotencyRecords = await requestResult(
+          operationIdempotencyStore
+            .index('projectId')
+            .getAll(projectId) as IDBRequest<OperationIdempotencyRecord[]>
+        );
+        for (const id of operationIds) operationStore.delete(id);
+        for (const event of journalEvents) {
+          if (operationIds.has(event.operationId)) {
+            operationJournalStore.delete(event.eventId);
+          }
+        }
+        for (const record of idempotencyRecords) {
+          if (operationIds.has(record.operationId)) {
+            operationIdempotencyStore.delete(record.key);
+          }
+        }
+      }
+
+      await transactionDone(idbTransaction);
+      return plan;
+    } catch (error) {
+      try {
+        idbTransaction.abort();
+      } catch {
+        // The transaction may already have aborted.
+      }
+      try {
+        await transactionDone(idbTransaction);
+      } catch {
+        // Preserve the original failure; IndexedDB abort keeps the delete set atomic.
+      }
+      throw error;
+    }
+  }
+
+  async close(): Promise<void> {
     if (this.databasePromise) {
       const database = await this.databasePromise;
       database.close();
       this.databasePromise = null;
     }
     this.idempotencyMigrated = false;
+  }
+
+  async deleteDatabase(): Promise<void> {
+    await this.close();
     await requestResult(indexedDB.deleteDatabase(this.databaseName));
   }
 }

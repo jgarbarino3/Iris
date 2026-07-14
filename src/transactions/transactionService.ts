@@ -20,6 +20,9 @@ import {
   type TransactionFailureV1,
   type TransactionErrorCode,
   type TransactionJournalEventV1,
+  type HistoryPruneResultV1,
+  type ProjectHistoryExportV1,
+  type RecentHistoryV1,
   TransactionError,
   isSha256,
   sanitizeProvenance,
@@ -45,6 +48,8 @@ import {
   buildDurableInverseProposal,
   inspectRevertEligibility,
 } from './durableRevert';
+import { buildRecentHistory } from './history';
+import { buildProjectHistoryExport } from './historyExport';
 
 export type SupersedeTransactionResultV1 = {
   original: EditTransactionV1;
@@ -679,6 +684,61 @@ export class TransactionService {
 
   listOperations(projectId: string): Promise<EditOperationV1[]> {
     return this.repository.listOperations(projectId);
+  }
+
+  async pruneHistory(projectId: string): Promise<HistoryPruneResultV1> {
+    const evaluatedAt = this.now();
+    const plan = await this.repository.pruneProjectHistory(
+      projectId,
+      evaluatedAt
+    );
+    return {
+      schemaVersion: 1,
+      projectId,
+      evaluatedAt,
+      cutoffAt: plan.cutoffAt,
+      maxTerminalRecords: plan.maxTerminalRecords,
+      prunedTransactionIds: plan.prunedTransactionIds,
+      prunedOperationIds: plan.prunedOperationIds,
+      retainedTerminalCount: plan.retainedTerminalCount,
+    };
+  }
+
+  async getRecentHistory(
+    projectId: string,
+    limit: number
+  ): Promise<RecentHistoryV1> {
+    await this.pruneHistory(projectId);
+    const [transactions, operations] = await Promise.all([
+      this.repository.list({ projectId }),
+      this.repository.listOperations(projectId),
+    ]);
+    return buildRecentHistory({
+      projectId,
+      transactions,
+      operations,
+      generatedAt: this.now(),
+      limit,
+    });
+  }
+
+  async exportHistory(projectId: string): Promise<ProjectHistoryExportV1> {
+    await this.pruneHistory(projectId);
+    const [transactions, operations, transactionJournal, operationJournal] =
+      await Promise.all([
+        this.repository.list({ projectId }),
+        this.repository.listOperations(projectId),
+        this.repository.listProjectJournal(projectId),
+        this.repository.listProjectOperationJournal(projectId),
+      ]);
+    return buildProjectHistoryExport({
+      projectId,
+      generatedAt: this.now(),
+      transactions,
+      operations,
+      transactionJournal,
+      operationJournal,
+    });
   }
 
   async exportRecoveryBundle(projectId: string, operationId: string) {

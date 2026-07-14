@@ -3,6 +3,8 @@ import type {
   EditOperationStateV1,
   EditProvenanceV1,
   EditTransactionState,
+  RevertEligibilityV1,
+  TransactionErrorCode,
 } from '../../transactions/contracts';
 
 export type ProviderId = 'claude' | 'codex' | 'pi';
@@ -110,6 +112,9 @@ export type StoredReviewProjectionV1 = {
   reasonCode?: LegacyReviewMigrationReasonV1;
   transactionState?: EditTransactionState;
   operationState?: EditOperationStateV1;
+  revertEligibility?: RevertEligibilityV1;
+  inverseState?: EditTransactionState;
+  inverseFailureCode?: TransactionErrorCode;
 };
 
 type StoredPatchReviewProjectionFields = {
@@ -569,6 +574,22 @@ function normalizeReviewProjection(
       : {}),
     ...(typeof raw.operationState === 'string'
       ? { operationState: raw.operationState as EditOperationStateV1 }
+      : {}),
+    ...(raw.revertEligibility &&
+    typeof raw.revertEligibility === 'object' &&
+    raw.revertEligibility.schemaVersion === 1 &&
+    typeof raw.revertEligibility.projectId === 'string' &&
+    typeof raw.revertEligibility.transactionId === 'string' &&
+    typeof raw.revertEligibility.eligible === 'boolean' &&
+    typeof raw.revertEligibility.disposition === 'string' &&
+    typeof raw.revertEligibility.reason === 'string'
+      ? { revertEligibility: raw.revertEligibility as RevertEligibilityV1 }
+      : {}),
+    ...(typeof raw.inverseState === 'string'
+      ? { inverseState: raw.inverseState as EditTransactionState }
+      : {}),
+    ...(typeof raw.inverseFailureCode === 'string'
+      ? { inverseFailureCode: raw.inverseFailureCode as TransactionErrorCode }
       : {}),
   };
 }

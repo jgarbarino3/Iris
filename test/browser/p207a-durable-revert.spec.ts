@@ -98,6 +98,7 @@ function proposal(options: {
   key: string;
   content: string;
   replacementText: string;
+  requestSummary?: string;
 }) {
   const expectedText = 'target';
   const from = options.content.indexOf(expectedText);
@@ -124,7 +125,8 @@ function proposal(options: {
     provenance: {
       provider: 'codex' as const,
       model: 'browser-fixture',
-      requestSummary: 'P2-07A deterministic browser fixture',
+      requestSummary:
+        options.requestSummary ?? 'P2-07A deterministic browser fixture',
       contextCategories: ['exact-range'],
     },
   };
@@ -359,5 +361,177 @@ test('drifted revert conflicts with zero mutation and keeps the original applied
     (window as any).__irisP207aFixture.snapshot()
   );
   expect(snapshot.content).toBe('LEFT changed RIGHT');
+  expect(snapshot.dispatches).toHaveLength(0);
+});
+
+test('recent history and accepted-card Revert create one review-required inverse, export redacted JSON, and reconstruct once', async ({
+  context,
+}) => {
+  const { page, harness, editorTabId } = await openFixture(context);
+  const original = await proposeAndApply(
+    harness,
+    editorTabId,
+    proposal({
+      key: `p207bc-ui-${crypto.randomUUID()}`,
+      content: INITIAL_CONTENT,
+      replacementText: 'IRIS',
+      requestSummary: 'P2-07B+C browser fixture IRIS_SENTINEL_SECRET_BROWSER',
+    }),
+    'p207bc-ui-original-selection'
+  );
+  await page.evaluate(() => {
+    (window as any).__irisP207aFixture.resetDispatches();
+  });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.locator('#ageaf-panel-root')).toHaveCount(1);
+  await page.evaluate(() => {
+    const fixture = (window as any).__irisP207aFixture;
+    fixture.setContent('LEFT IRIS RIGHT');
+    fixture.resetDispatches();
+  });
+  const originalCard = page.locator(`[data-transaction-id="${original.id}"]`);
+  await expect(originalCard).toHaveCount(1);
+  await expect(
+    originalCard.getByRole('button', {
+      name: 'Create review-required inverse',
+    })
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open recent edit history' }).click();
+  const historyItem = page.locator(
+    `[data-history-transaction-id="${original.id}"]`
+  );
+  await expect(historyItem).toHaveAttribute('data-history-revertible', 'true');
+  await expect(historyItem).toHaveAttribute('data-history-status', 'applied');
+  await page.getByRole('button', { name: 'Close recent edit history' }).click();
+
+  await originalCard
+    .getByRole('button', { name: 'Create review-required inverse' })
+    .click();
+  await expect
+    .poll(async () => {
+      const response = await rpc(
+        harness,
+        editorTabId,
+        'getRevertRelationship',
+        { projectId: PROJECT_ID, id: original.id }
+      );
+      return response.ok && response.result.inverse ? response.result : null;
+    })
+    .not.toBeNull();
+  const durableRelationship = await rpc(
+    harness,
+    editorTabId,
+    'getRevertRelationship',
+    { projectId: PROJECT_ID, id: original.id }
+  );
+  expect(durableRelationship.ok, JSON.stringify(durableRelationship)).toBe(
+    true
+  );
+  const inverseId = durableRelationship.result.inverse.id as string;
+  expect(durableRelationship.result.inverse.state).toBe('proposed');
+
+  let snapshot = await page.evaluate(() =>
+    (window as any).__irisP207aFixture.snapshot()
+  );
+  expect(snapshot.content).toBe('LEFT IRIS RIGHT');
+  expect(snapshot.dispatches).toHaveLength(0);
+  await expect(originalCard).toContainText('Inverse proposed');
+  const inverseCard = page.locator(`[data-transaction-id="${inverseId}"]`);
+  await expect(inverseCard).toHaveCount(1);
+  await expect(
+    page.locator(`[data-transaction-id="${inverseId}"]`)
+  ).toHaveCount(1);
+
+  await inverseCard.getByRole('button', { name: 'Accept' }).click();
+  await expect
+    .poll(
+      async () =>
+        (
+          await page.evaluate(() =>
+            (window as any).__irisP207aFixture.snapshot()
+          )
+        ).content
+    )
+    .toBe(INITIAL_CONTENT);
+  snapshot = await page.evaluate(() =>
+    (window as any).__irisP207aFixture.snapshot()
+  );
+  expect(snapshot.dispatches).toHaveLength(1);
+
+  const completed = await rpc(harness, editorTabId, 'getRevertRelationship', {
+    projectId: PROJECT_ID,
+    id: original.id,
+  });
+  expect(completed.ok, JSON.stringify(completed)).toBe(true);
+  expect(completed.result.original.state).toBe('reverted');
+  expect(completed.result.inverse.state).toBe('applied');
+  expect(completed.result.inverse.receipt.success).toBe(true);
+  await expect(originalCard).toContainText('Reverted');
+  await expect(
+    originalCard.getByRole('button', {
+      name: 'Create review-required inverse',
+    })
+  ).toHaveCount(0);
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.locator('#ageaf-panel-root')).toHaveCount(1);
+  await expect(
+    page.locator(`[data-transaction-id="${original.id}"]`)
+  ).toHaveCount(1);
+  await expect(
+    page.locator(`[data-transaction-id="${inverseId}"]`)
+  ).toHaveCount(1);
+  snapshot = await page.evaluate(() =>
+    (window as any).__irisP207aFixture.snapshot()
+  );
+  expect(snapshot.content).toBe(INITIAL_CONTENT);
+  expect(snapshot.dispatches).toHaveLength(0);
+
+  await page.getByRole('button', { name: 'Open recent edit history' }).click();
+  await expect(
+    page.locator(`[data-history-transaction-id="${original.id}"]`)
+  ).toHaveAttribute('data-history-status', 'reverted');
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export JSON' }).click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  if (!downloadPath) throw new Error('History export did not create a file');
+  const exported = JSON.parse(
+    await (await import('node:fs/promises')).readFile(downloadPath, 'utf8')
+  );
+  expect(exported.schemaVersion).toBe(1);
+  expect(exported.protocolVersion).toBe(1);
+  expect(exported.projectId).toBe(PROJECT_ID);
+  expect(
+    exported.transactions.map((entry: any) => entry.transactionId).sort()
+  ).toEqual([original.id, inverseId].sort());
+  expect(
+    exported.transactions.every(
+      (entry: any) => entry.target.filePath === 'main.tex'
+    )
+  ).toBe(true);
+  const exportedJson = JSON.stringify(exported);
+  expect(exportedJson).not.toContain('IRIS_SENTINEL_SECRET_BROWSER');
+  expect(exportedJson).not.toContain('requestSummary');
+  expect(exportedJson).not.toContain('/Users/');
+
+  const duplicate = await rpc(
+    harness,
+    editorTabId,
+    'createRevert',
+    {
+      projectId: PROJECT_ID,
+      id: original.id,
+      expectedRevision: completed.result.original.revision,
+    },
+    'p207bc-ui-duplicate'
+  );
+  expect(duplicate.ok, JSON.stringify(duplicate)).toBe(true);
+  expect(duplicate.result.inverse.id).toBe(inverseId);
+  snapshot = await page.evaluate(() =>
+    (window as any).__irisP207aFixture.snapshot()
+  );
   expect(snapshot.dispatches).toHaveLength(0);
 });

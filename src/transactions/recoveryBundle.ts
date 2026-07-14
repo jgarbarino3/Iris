@@ -27,10 +27,13 @@ export function redactRecoveryText(value: string): string {
     .replace(/\bsk-[^\s"'`]+/g, REDACTED)
     .replace(/authorization\s*:\s*(?:bearer\s+)?[^\r\n]+/gi, REDACTED)
     .replace(/cookie\s*:\s*[^\r\n]+/gi, REDACTED)
+    .replace(/set-cookie\s*:\s*[^\r\n]+/gi, REDACTED)
     .replace(
       /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|AUTH|COOKIE)[A-Z0-9_]*)\s*=\s*[^\s\r\n]+/gi,
       `$1=${REDACTED}`
-    );
+    )
+    .replace(/\/Users\/[^\s"'`]+/g, '[REDACTED_PATH]')
+    .replace(/[A-Za-z]:\\[^\s"'`]+/g, '[REDACTED_PATH]');
 }
 
 export function recoveryProjectRelativePath(value: string): string {
@@ -49,14 +52,14 @@ export function recoveryProjectRelativePath(value: string): string {
   return safeParts.join('/') || 'unknown';
 }
 
-function sanitizeReceipt(
+export function sanitizeRecoveryReceipt(
   receipt: ApplyEditBatchReceiptV1 | undefined
 ): ApplyEditBatchReceiptV1 | undefined {
   if (!receipt) return undefined;
   const appliedChanges = Array.isArray(receipt.appliedChanges)
     ? receipt.appliedChanges.map(
         (change): AppliedChangeReceiptV1 => ({
-          transactionId: String(change.transactionId),
+          transactionId: redactRecoveryText(String(change.transactionId)),
           from: Number(change.from),
           to: Number(change.to),
           oldText: redactRecoveryText(String(change.oldText ?? '')),
@@ -78,8 +81,8 @@ function sanitizeReceipt(
   return {
     schemaVersion: 1,
     protocolVersion: 1,
-    requestId: String(receipt.requestId),
-    batchId: String(receipt.batchId),
+    requestId: redactRecoveryText(String(receipt.requestId)),
+    batchId: redactRecoveryText(String(receipt.batchId)),
     success: receipt.success === true,
     ...(typeof receipt.beforeSha256 === 'string'
       ? { beforeSha256: receipt.beforeSha256.toLowerCase() }
@@ -187,10 +190,14 @@ export async function buildRecoveryBundle(
       transactionIds: [...batch.transactionIds],
       changes,
       ...(batch.receipt
-        ? { forwardReceipt: sanitizeReceipt(batch.receipt) }
+        ? { forwardReceipt: sanitizeRecoveryReceipt(batch.receipt) }
         : {}),
       ...(batch.compensationReceipt
-        ? { compensationReceipt: sanitizeReceipt(batch.compensationReceipt) }
+        ? {
+            compensationReceipt: sanitizeRecoveryReceipt(
+              batch.compensationReceipt
+            ),
+          }
         : {}),
       errorCodes: [...errorCodes].sort(),
     });

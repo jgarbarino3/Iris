@@ -70,7 +70,7 @@ test('P2-04 full receipt membership and atomic persistence make implicit partial
   assert.match(repository, /compareAndSwapOperation/);
   assert.match(
     panel,
-    /operation\.state === 'applied'[\s\S]*transaction\.state !== 'applied'[\s\S]*status: 'accepted'/
+    /operation\.state === 'applied'[\s\S]*transaction\.state !== 'applied'[\s\S]*transaction\.receipt\?\.success !== true[\s\S]*projectTransactionPatchReview\(transaction, current, operation\)/
   );
 });
 

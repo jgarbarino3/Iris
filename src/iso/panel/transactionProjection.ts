@@ -18,6 +18,7 @@ import {
   recoveryProjectRelativePath,
   redactRecoveryText,
 } from '../../transactions/recoveryBundle';
+import { inspectRevertEligibility } from '../../transactions/durableRevert';
 import type {
   LegacyReplacementMigrationV1,
   LegacyReviewMigrationReasonV1,
@@ -399,7 +400,8 @@ function operationOutcome(operation: EditOperationV1 | undefined): {
 export function projectTransactionPatchReview(
   transaction: EditTransactionV1,
   existing?: StoredPatchReview,
-  operation?: EditOperationV1
+  operation?: EditOperationV1,
+  transactions?: Map<string, EditTransactionV1>
 ): StoredPatchReview {
   const receiptBackedApplied =
     transaction.state === 'applied' && transaction.receipt?.success === true;
@@ -413,6 +415,20 @@ export function projectTransactionPatchReview(
   const actionable =
     transaction.state === 'proposed' || transaction.state === 'conflicted';
   const operationProjection = operationOutcome(operation);
+  const inverse = transaction.revertedByTransactionId
+    ? transactions?.get(transaction.revertedByTransactionId)
+    : undefined;
+  let revertEligibility;
+  if (!transaction.revertsTransactionId) {
+    try {
+      revertEligibility = inspectRevertEligibility(
+        transaction,
+        inverse ?? null
+      );
+    } catch {
+      revertEligibility = undefined;
+    }
+  }
   const projection: StoredReviewProjectionV1 = {
     schemaVersion: 1,
     key: `transaction:${transaction.id}`,
@@ -424,6 +440,11 @@ export function projectTransactionPatchReview(
     transactionState: transaction.state,
     ...(operationProjection.state
       ? { operationState: operationProjection.state }
+      : {}),
+    ...(revertEligibility ? { revertEligibility } : {}),
+    ...(inverse ? { inverseState: inverse.state } : {}),
+    ...(inverse?.failure?.code
+      ? { inverseFailureCode: inverse.failure.code }
       : {}),
   };
   const common = {
@@ -560,6 +581,8 @@ function appendReconstructedCard(
   review: StoredPatchReview
 ): StoredProjectChat {
   let provider = providerForTransaction(transaction);
+  const activeProviderHasConversations =
+    state.providers[state.activeProvider].conversations.length > 0;
   let conversationId = transaction.conversationId;
   for (const candidate of ['claude', 'codex', 'pi'] as ProviderId[]) {
     const match = state.providers[candidate].conversations.find(
@@ -612,6 +635,9 @@ function appendReconstructedCard(
   );
   return {
     ...state,
+    activeProvider: activeProviderHasConversations
+      ? state.activeProvider
+      : provider,
     providers: {
       ...state.providers,
       [provider]: {
@@ -733,7 +759,8 @@ export async function reconcileProjectChatTransactions(options: {
           patchReview: projectTransactionPatchReview(
             transaction,
             existing,
-            operationMap.get(transaction.id)
+            operationMap.get(transaction.id),
+            transactionMap
           ),
         });
       }
@@ -774,7 +801,8 @@ export async function reconcileProjectChatTransactions(options: {
       projectTransactionPatchReview(
         transaction,
         undefined,
-        operationMap.get(transaction.id)
+        operationMap.get(transaction.id),
+        refreshedMap
       )
     );
   }

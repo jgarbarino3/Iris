@@ -1,6 +1,10 @@
 export const TRANSACTION_SCHEMA_VERSION = 1 as const;
 export const TRANSACTION_PROTOCOL_VERSION = 1 as const;
 export const TRANSACTION_DATABASE_VERSION = 3 as const;
+export const RECENT_HISTORY_DEFAULT_LIMIT = 50 as const;
+export const RECENT_HISTORY_MAX_LIMIT = 200 as const;
+export const TERMINAL_HISTORY_MAX_RECORDS = 1_000 as const;
+export const TERMINAL_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 export type TransactionRuntimeContext = {
   boundProjectId: string | null;
@@ -219,6 +223,120 @@ export type RevertRelationshipV1 = {
   inverse?: EditTransactionV1;
 };
 
+export type RecentHistoryStatusV1 =
+  | 'proposed'
+  | 'preflighted'
+  | 'applying'
+  | 'applied'
+  | 'inverse_proposed'
+  | 'reverted'
+  | 'conflicted'
+  | 'failed'
+  | 'rejected'
+  | 'superseded'
+  | 'recovery_required';
+
+export type RecentHistoryRelationshipStatusV1 =
+  | 'none'
+  | 'valid'
+  | 'missing'
+  | 'corrupt';
+
+export type RecentHistoryEntryV1 = {
+  schemaVersion: 1;
+  transactionId: string;
+  projectId: string;
+  intent: 'insert' | 'replace';
+  editType: 'insert' | 'replace' | 'inverse';
+  filePath: string;
+  fileId?: string;
+  state: EditTransactionState;
+  status: RecentHistoryStatusV1;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  appliedAt?: number;
+  revertedAt?: number;
+  failureCode?: TransactionErrorCode;
+  receiptBacked: boolean;
+  safelyRevertible: boolean;
+  revertEligibility?: RevertEligibilityV1;
+  supersedesTransactionId?: string;
+  supersededByTransactionId?: string;
+  revertsTransactionId?: string;
+  inverseTransactionId?: string;
+  inverseState?: EditTransactionState;
+  inverseFailureCode?: TransactionErrorCode;
+  relationshipStatus: RecentHistoryRelationshipStatusV1;
+};
+
+export type RecentHistoryV1 = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  projectId: string;
+  generatedAt: number;
+  limit: number;
+  entries: RecentHistoryEntryV1[];
+};
+
+export type HistoryExportTransactionV1 = {
+  transactionId: string;
+  operationIds: string[];
+  intent: 'insert' | 'replace';
+  state: EditTransactionState;
+  revision: number;
+  target: EditTargetV1;
+  expectedText: string;
+  replacementText: string;
+  baseContentSha256: string;
+  expectedPostApplySha256?: string;
+  createdAt: number;
+  updatedAt: number;
+  appliedAt?: number;
+  revertedAt?: number;
+  rejectedAt?: number;
+  failedAt?: number;
+  failureCode?: TransactionErrorCode;
+  receipt?: ApplyEditBatchReceiptV1;
+  supersedesTransactionId?: string;
+  supersededByTransactionId?: string;
+  revertsTransactionId?: string;
+  revertedByTransactionId?: string;
+  journalEvents: TransactionJournalEventV1[];
+};
+
+export type HistoryExportOperationV1 = {
+  operationId: string;
+  state: EditOperationStateV1;
+  revision: number;
+  transactionIds: string[];
+  createdAt: number;
+  updatedAt: number;
+  failureCode?: TransactionErrorCode;
+  recoveryOperationId?: string;
+  journalEvents: OperationJournalEventV1[];
+};
+
+export type ProjectHistoryExportV1 = {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  projectId: string;
+  generatedAt: number;
+  transactions: HistoryExportTransactionV1[];
+  operations: HistoryExportOperationV1[];
+};
+
+export type HistoryPruneResultV1 = {
+  schemaVersion: 1;
+  projectId: string;
+  evaluatedAt: number;
+  cutoffAt: number;
+  maxTerminalRecords: number;
+  prunedTransactionIds: string[];
+  prunedOperationIds: string[];
+  retainedTerminalCount: number;
+};
+
 export type FileBatchStateV1 =
   | 'proposed'
   | 'preflighted'
@@ -385,6 +503,9 @@ export type TransactionRuntimeActionV1 =
   | 'inspectRevertEligibility'
   | 'createRevert'
   | 'getRevertRelationship'
+  | 'getRecentHistory'
+  | 'exportHistory'
+  | 'pruneHistory'
   | 'reconcile'
   | 'cancel';
 
@@ -928,6 +1049,26 @@ export function parseListPayload(payload: unknown): ListTransactionsV1 {
     query.limit = source.limit as number;
   }
   return query;
+}
+
+export function parseRecentHistoryPayload(payload: unknown): {
+  projectId: string;
+  limit: number;
+} {
+  const source = requireObject(payload);
+  const projectId = requireString(source, 'projectId');
+  const rawLimit = source.limit;
+  if (rawLimit === undefined) {
+    return { projectId, limit: RECENT_HISTORY_DEFAULT_LIMIT };
+  }
+  if (
+    !Number.isInteger(rawLimit) ||
+    (rawLimit as number) < 1 ||
+    (rawLimit as number) > RECENT_HISTORY_MAX_LIMIT
+  ) {
+    throw new TransactionError('INVALID_REQUEST', 'Invalid history limit');
+  }
+  return { projectId, limit: rawLimit as number };
 }
 
 export function sanitizeProvenance(

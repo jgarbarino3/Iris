@@ -91,6 +91,9 @@ type PatchReviewCardProps = {
   onReject: () => void;
   onStrictRebase?: () => void;
   onRetarget?: () => void;
+  onRevert?: () => void;
+  canRevert?: boolean;
+  revertStatus?: string | null;
   markAnimated: () => void;
   isLightMode?: boolean;
 };
@@ -109,6 +112,9 @@ export function PatchReviewCard({
   onReject,
   onStrictRebase,
   onRetarget,
+  onRevert,
+  canRevert = false,
+  revertStatus = null,
   markAnimated,
   isLightMode,
 }: PatchReviewCardProps) {
@@ -184,7 +190,10 @@ export function PatchReviewCard({
       : undefined;
 
   return (
-    <div class="ageaf-patch-review">
+    <div
+      class="ageaf-patch-review"
+      data-transaction-id={patchReview.transactionId ?? ''}
+    >
       <div class="ageaf-patch-review__header">
         <div class="ageaf-patch-review__title">
           {title}
@@ -307,8 +316,23 @@ export function PatchReviewCard({
               )}
             </>
           ) : null}
+          {status === 'accepted' && canRevert && onRevert ? (
+            <button
+              class="ageaf-panel__apply is-secondary"
+              type="button"
+              disabled={busy}
+              onClick={onRevert}
+              aria-label="Create review-required inverse"
+            >
+              Revert
+            </button>
+          ) : null}
         </div>
       </div>
+
+      {status === 'accepted' && revertStatus ? (
+        <div class="ageaf-patch-review__revert-status">{revertStatus}</div>
+      ) : null}
 
       {error ? (
         <div class="ageaf-patch-review__warning">

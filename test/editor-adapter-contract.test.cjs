@@ -47,9 +47,12 @@ test('panel marks edits accepted only after a durable transaction receipt', () =
   const panel = read('src/iso/panel/Panel.tsx');
   assert.match(panel, /transactionRpc<EditOperationV1>\(\s*'applySelection'/);
   assert.match(panel, /operation\.state === 'applied'/);
+  assert.match(panel, /transaction\.state !== 'applied'/);
   assert.match(panel, /transaction\.receipt\?\.success !== true/);
-  assert.match(panel, /status: 'accepted'/);
-  assert.match(panel, /transactionRevision: transaction\.revision/);
+  assert.match(
+    panel,
+    /projectTransactionPatchReview\(transaction, current, operation\)/
+  );
   assert.doesNotMatch(panel, /ageafBridge\.insertAtCursor/);
   assert.doesNotMatch(panel, /applyReplaceRange|applyReplaceInFile/);
 });

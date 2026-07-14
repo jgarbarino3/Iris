@@ -4196,3 +4196,181 @@
   background: rgba(33, 124, 244, 0.08);
   border-color: rgba(33, 124, 244, 0.24);
 }
+
+/* Durable recent edit history */
+.ageaf-panel__history-toggle,
+.ageaf-history__button,
+.ageaf-history__close {
+  border: 1px solid var(--ageaf-panel-border);
+  background: transparent;
+  color: var(--ageaf-panel-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ageaf-panel__history-toggle {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.ageaf-panel__history-toggle:hover,
+.ageaf-history__button:hover:not(:disabled),
+.ageaf-history__close:hover {
+  background: color-mix(in srgb, var(--ageaf-panel-text) 8%, transparent);
+}
+
+.ageaf-history {
+  position: absolute;
+  z-index: 18;
+  inset: 64px 10px 10px 10px;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ageaf-panel-border);
+  border-radius: 10px;
+  background: var(--ageaf-panel-bg);
+  color: var(--ageaf-panel-text);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.24);
+}
+
+.ageaf-history__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--ageaf-panel-border);
+}
+
+.ageaf-history__header > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.ageaf-history__header strong {
+  font-size: 14px;
+}
+
+.ageaf-history__header span,
+.ageaf-history__type,
+.ageaf-history time,
+.ageaf-history__status-row {
+  color: var(--ageaf-panel-muted);
+  font-size: 11px;
+}
+
+.ageaf-history__header-actions,
+.ageaf-history__item-actions,
+.ageaf-history__status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ageaf-history__button {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.ageaf-history__button.is-primary {
+  border-color: var(--ageaf-panel-accent);
+  color: var(--ageaf-panel-accent);
+}
+
+.ageaf-history__button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.ageaf-history__close {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ageaf-history__list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.ageaf-history__item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--ageaf-panel-border);
+  border-radius: 8px;
+  background: var(--ageaf-panel-surface);
+}
+
+.ageaf-history__item + .ageaf-history__item {
+  margin-top: 8px;
+}
+
+.ageaf-history__item-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  align-items: center;
+}
+
+.ageaf-history__file {
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ageaf-panel-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ageaf-history__item-main time {
+  grid-column: 1 / -1;
+}
+
+.ageaf-history__status {
+  color: var(--ageaf-panel-text);
+  font-weight: 600;
+}
+
+.ageaf-history__status.is-conflicted,
+.ageaf-history__status.is-failed,
+.ageaf-history__status.is-recovery_required {
+  color: #e1a55b;
+}
+
+.ageaf-history__status.is-applied,
+.ageaf-history__status.is-reverted {
+  color: var(--ageaf-panel-accent);
+}
+
+.ageaf-history__error,
+.ageaf-history__empty {
+  padding: 14px;
+  color: var(--ageaf-panel-muted);
+  font-size: 12px;
+}
+
+.ageaf-history__error {
+  color: #e1a55b;
+}
+
+.ageaf-patch-review__revert-status {
+  padding: 7px 10px;
+  border-top: 1px solid var(--ageaf-panel-border);
+  color: var(--ageaf-panel-muted);
+  font-size: 11px;
+}
