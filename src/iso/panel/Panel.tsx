@@ -1150,6 +1150,10 @@ const Panel = () => {
   const fileAttachmentsRef = useRef<FileAttachment[]>([]);
   const [documentAttachments, setDocumentAttachments] = useState<DocumentAttachment[]>([]);
   const documentAttachmentsRef = useRef<DocumentAttachment[]>([]);
+  // Hidden browser file input used by the Attach button for images/PDFs, which
+  // must be read as real file content (base64) — the native path-based dialog
+  // cannot supply image bytes, so picked PNGs never reached the model.
+  const attachInputRef = useRef<HTMLInputElement | null>(null);
   const overlayActiveDetailsRef = useRef<Map<string, string>>(new Map());
   const [projectFiles, setProjectFiles] = useState<OverleafEntry[]>([]);
   const projectFilesRef = useRef<OverleafEntry[]>([]);
@@ -3317,6 +3321,30 @@ const Panel = () => {
   const addDocumentsFromFiles = async (files: File[]) => {
     for (const file of files) {
       await addDocumentFromFile(file);
+    }
+  };
+
+  // Handle files chosen via the browser Attach input. Images go to the vision
+  // pipeline and PDFs/office docs to the document pipeline — both as real
+  // base64 content — so an attached PNG actually reaches the model.
+  const onAttachInputChange = async (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement | null;
+    const picked = input?.files ? Array.from(input.files) : [];
+    if (input) input.value = '';
+    if (picked.length === 0) return;
+    const images = picked.filter((f) => Boolean(getImageMediaType(f)));
+    const docs = picked.filter(
+      (f) => !getImageMediaType(f) && Boolean(getDocumentMediaType(f))
+    );
+    const unsupported = picked.filter(
+      (f) => !getImageMediaType(f) && !getDocumentMediaType(f)
+    );
+    if (images.length > 0) await addImagesFromFiles(images, 'drop');
+    if (docs.length > 0) await addDocumentsFromFiles(docs);
+    if (unsupported.length > 0) {
+      showAttachmentError(
+        'Only images (PNG, JPG, GIF, WebP) and documents (PDF, DOCX, PPTX, XLSX) can be attached here.'
+      );
     }
   };
 
@@ -12192,12 +12220,20 @@ const Panel = () => {
                 <button
                   class="ageaf-toolbar-button"
                   type="button"
-                  onClick={() => void onOpenFilePicker()}
-                  aria-label="Attach files"
-                  data-tooltip="Attach files"
+                  onClick={() => attachInputRef.current?.click()}
+                  aria-label="Attach image or document"
+                  data-tooltip="Attach image or document"
                 >
                   <AttachFilesIcon />
                 </button>
+                <input
+                  ref={attachInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,.docx,.pptx,.xlsx"
+                  multiple
+                  style="display: none"
+                  onChange={(e) => void onAttachInputChange(e)}
+                />
                 <div class="ageaf-toolbar-menu">
                   <button
                     class="ageaf-toolbar-button"
