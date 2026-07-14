@@ -1,4 +1,7 @@
-import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import {
+  AUTOMATIC_PLACEMENT_GUIDANCE,
+  IMAGE_FIGURE_GUIDANCE,
+} from '../../prompts/placementGuidance.js';
 import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
 
 export type PiPromptInput = {
@@ -116,6 +119,7 @@ export function buildPiSystemPrompt(input: PiPromptInput): string {
     toolsGuidance ?? '',
     patchGuidance,
     AUTOMATIC_PLACEMENT_GUIDANCE,
+    IMAGE_FIGURE_GUIDANCE,
     COMPILE_FIX_GUIDANCE,
     selectionPatchGuidance,
     hasOverleafFileBlocks ? fileUpdateGuidance : '',

@@ -40,6 +40,23 @@ export const AUTOMATIC_PLACEMENT_GUIDANCE = [
 ].join('\n');
 
 /**
+ * Guidance for inserting an uploaded image as a figure (Phase 3, one-shot).
+ * When the user attaches an image and asks to place it, the extension uploads
+ * it into the Overleaf project and reports the saved filename(s) in
+ * `Context.uploadedImages`. The model then inserts a real figure that
+ * references that filename via the anchored placement path.
+ */
+export const IMAGE_FIGURE_GUIDANCE = [
+  'Inserting an uploaded image as a figure:',
+  '- When `Context.uploadedImages` is present, each entry has a `fileName` that has ALREADY been uploaded into the Overleaf project. Use that exact `fileName` in `\\includegraphics` — do NOT invent a path and do NOT ask the user to upload it.',
+  '- Build a complete figure environment and place it with the SAME `insertAtAnchor` mechanism described in "Automatic placement" (resolve the location from the user\'s words, e.g. "in the results section" / "after the motivation").',
+  '- Honor the requested size: "half the page" → `\\includegraphics[width=0.5\\textwidth]{...}`, "full width" → `[width=\\textwidth]{...}`; otherwise default to `[width=0.8\\textwidth]{...}`. Center it, add a short `\\caption{...}` and a `\\label{fig:...}` derived from the filename.',
+  '- Example `text` for the insertAtAnchor patch (adjust caption/size/label): "\\n\\n\\begin{figure}[h]\\n\\centering\\n\\includegraphics[width=0.5\\textwidth]{FILENAME}\\n\\caption{CAPTION}\\n\\label{fig:LABEL}\\n\\end{figure}\\n".',
+  '- If the document has no `\\usepackage{graphicx}` in the preamble, mention that it is required in your visible one-line note (do not silently rely on it).',
+  '- Emit ONLY the single `insertAtAnchor` figure patch — one review card.',
+].join('\n');
+
+/**
  * Cheap heuristic used by tests and (optionally) callers to recognise a
  * placement-intent message. The model still makes the final call from the full
  * prompt; this exists to document and verify the intended trigger surface.

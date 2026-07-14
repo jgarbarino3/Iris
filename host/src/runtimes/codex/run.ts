@@ -8,7 +8,10 @@ import { promisify } from 'node:util';
 import { normalizeToolInput, extractToolDisplayInfo, MAX_TOOL_DISPLAY_LEN } from '../../toolDisplayInfo.js';
 import type { JobEvent } from '../../types.js';
 import { buildAttachmentBlock, getAttachmentLimits } from '../../attachments/textAttachments.js';
-import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import {
+  AUTOMATIC_PLACEMENT_GUIDANCE,
+  IMAGE_FIGURE_GUIDANCE,
+} from '../../prompts/placementGuidance.js';
 import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
 import {
   buildDocumentAttachmentBlock,
@@ -897,6 +900,7 @@ function buildPrompt(
       ? patchGuidance
       : '',
     action === 'chat' ? AUTOMATIC_PLACEMENT_GUIDANCE : '',
+    action === 'chat' ? IMAGE_FIGURE_GUIDANCE : '',
     action === 'chat' ? COMPILE_FIX_GUIDANCE : '',
     action === 'chat' ? selectionPatchGuidance : '',
     `Action: ${action}`,

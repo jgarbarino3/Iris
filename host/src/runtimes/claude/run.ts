@@ -16,7 +16,10 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { buildReplaceRangePatchesFromFileUpdates } from '../../patch/fileUpdate.js';
 import { sendCompactCommand } from '../../compaction/sendCompact.js';
 import { getClaudeSessionCwd } from './cwd.js';
-import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import {
+  AUTOMATIC_PLACEMENT_GUIDANCE,
+  IMAGE_FIGURE_GUIDANCE,
+} from '../../prompts/placementGuidance.js';
 import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
 
 type EmitEvent = (event: JobEvent) => void;
@@ -484,6 +487,7 @@ If asked about the model/runtime, use this note and do not guess.`;
     responseGuidance,
     patchGuidance,
     AUTOMATIC_PLACEMENT_GUIDANCE,
+    IMAGE_FIGURE_GUIDANCE,
     COMPILE_FIX_GUIDANCE,
     selectionPatchGuidance,
     hasOverleafFileBlocks ? fileUpdateGuidance : '',

@@ -3,8 +3,20 @@ import test from 'node:test';
 
 import {
   AUTOMATIC_PLACEMENT_GUIDANCE,
+  IMAGE_FIGURE_GUIDANCE,
   looksLikePlacementIntent,
 } from '../src/prompts/placementGuidance.js';
+
+test('image figure guidance uses the uploaded filename and insertAtAnchor', () => {
+  const g = IMAGE_FIGURE_GUIDANCE;
+  assert.match(g, /Context\.uploadedImages/);
+  assert.match(g, /fileName/);
+  assert.match(g, /\\includegraphics/);
+  assert.match(g, /insertAtAnchor/);
+  assert.match(g, /width=0\.5\\textwidth/);
+  assert.match(g, /graphicx/);
+  assert.match(g, /do NOT ask the user to upload/i);
+});
 
 test('placement guidance instructs a cursor-free insertAtAnchor placement', () => {
   const g = AUTOMATIC_PLACEMENT_GUIDANCE;

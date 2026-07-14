@@ -6,6 +6,7 @@ import {
   type ProjectFile,
 } from './latexExpand';
 import { copyToClipboard } from './clipboard';
+import { uploadFileToOverleaf } from './overleafUpload';
 import {
   buildContextPayload,
   computeContextPolicy,
@@ -7383,6 +7384,52 @@ const Panel = () => {
       const activeFileNameForContext =
         activeFileFromBridge?.path ?? getActiveFilename();
       const activeFileIdForContext = getActiveFileId();
+
+      // Phase 3: one-shot image figures. When the user attaches an image and
+      // the message asks to place/insert/show it, upload it into the Overleaf
+      // project so a subsequently-inserted \includegraphics resolves, then tell
+      // the model the uploaded filename to reference.
+      const uploadedImages: Array<{ name: string; fileName: string }> = [];
+      const uploadProjectId = getOverleafProjectIdFromPathname(
+        window.location.pathname
+      );
+      if (images.length > 0 && uploadProjectId) {
+        const wantsImageInDoc =
+          /\b(insert|include|includegraphics|add|put|place|embed|show|display|figure|caption|half[- ]?page|full[- ]?page|width)\b/i.test(
+            text
+          ) ||
+          /\b(image|figure|picture|photo|diagram|graphic|screenshot|logo|plot|chart)\b/i.test(
+            text
+          );
+        if (wantsImageInDoc) {
+          for (const image of images) {
+            try {
+              const result = await uploadFileToOverleaf({
+                projectId: uploadProjectId,
+                name: image.name,
+                base64: image.data,
+                mediaType: image.mediaType,
+              });
+              if (result.ok) {
+                uploadedImages.push({
+                  name: image.name,
+                  fileName: result.fileName,
+                });
+              } else {
+                showAttachmentError(
+                  `Couldn't upload ${image.name} to Overleaf: ${result.error}`
+                );
+              }
+            } catch (error) {
+              showAttachmentError(
+                `Couldn't upload ${image.name} to Overleaf: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            }
+          }
+        }
+      }
       const sharedContext = {
         ...contextPayload,
         ...(activeFileNameForContext
@@ -7390,6 +7437,9 @@ const Panel = () => {
           : {}),
         ...(activeFileIdForContext
           ? { activeFileId: activeFileIdForContext }
+          : {}),
+        ...(uploadedImages.length > 0
+          ? { uploadedImages }
           : {}),
         ...(messageImages
           ? {
