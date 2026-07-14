@@ -12,6 +12,9 @@ test('Status line toggles CoT when both exist (no duplicate header)', () => {
   assert.match(contents, /toggleThinkingExpanded\(message\.id\)/);
 
   // Streaming: reuse the status line as the toggle instead of showing a second header.
-  assert.match(contents, /toggleThinkingExpanded\('streaming-thinking'\)/);
+  assert.match(
+    contents,
+    /toggleThinkingExpanded\(\s*'streaming-thinking'\s*\)/
+  );
   assert.match(contents, /hideHeader:\s*isStreamingCoTToggle/);
 });

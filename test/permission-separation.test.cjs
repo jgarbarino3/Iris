@@ -44,6 +44,6 @@ test('Phase 1 document mode cannot silently enable auto-apply', () => {
   assert.doesNotMatch(panel, /option value="auto/);
   assert.match(
     panel,
-    /Auto-apply arrives after the durable transaction engine/
+    /Auto-apply arrives\s+after the durable transaction engine/
   );
 });

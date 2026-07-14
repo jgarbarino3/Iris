@@ -1,5 +1,12 @@
-import { getContentAfterCursor, getContentBeforeCursor, getCmView } from '../helpers';
-import { MAX_LENGTH_AFTER_CURSOR, MAX_LENGTH_BEFORE_CURSOR } from '../../constants';
+import {
+  getContentAfterCursor,
+  getContentBeforeCursor,
+  getCmView,
+} from '../helpers';
+import {
+  MAX_LENGTH_AFTER_CURSOR,
+  MAX_LENGTH_BEFORE_CURSOR,
+} from '../../constants';
 import {
   canonicalFilePath,
   sha256Text,
@@ -22,8 +29,7 @@ const REQUEST_EVENT = 'ageaf:editor:request';
 const RESPONSE_EVENT = 'ageaf:editor:response';
 const BATCH_REQUEST_EVENT = 'ageaf:editor:batch:request';
 const BATCH_RESPONSE_EVENT = 'ageaf:editor:batch:response';
-const INSERTION_TARGET_REQUEST_EVENT =
-  'ageaf:editor:insertion-target:request';
+const INSERTION_TARGET_REQUEST_EVENT = 'ageaf:editor:insertion-target:request';
 const INSERTION_TARGET_RESPONSE_EVENT =
   'ageaf:editor:insertion-target:response';
 const TARGET_FILE_REQUEST_EVENT = 'ageaf:editor:target-file:request';
@@ -44,6 +50,7 @@ const BRIDGE_INSTANCE_ID =
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 let bridgeEventCursor = 0;
+let documentEpoch = 0;
 
 interface SelectionRequest {
   requestId: string;
@@ -64,6 +71,7 @@ interface SelectionResponse {
   head: number;
   lineFrom: number;
   lineTo: number;
+  docEpoch: number;
 }
 
 interface InsertionTargetRequestV1 {
@@ -77,6 +85,7 @@ interface InsertionTargetResponseV1 {
   fileId?: string;
   content: string;
   offset: number;
+  docEpoch?: number;
   ok: boolean;
   error?: string;
 }
@@ -114,6 +123,7 @@ interface TargetFileResponseV1 {
   filePath: string;
   fileId?: string;
   content: string;
+  docEpoch?: number;
   ok: boolean;
   error?: string;
 }
@@ -241,6 +251,7 @@ function installDispatchTracker(view: any) {
     const docBefore = view.state.doc;
     original(...specs);
     if (view.state.doc === docBefore) return;
+    documentEpoch += 1;
     if (reviewChangeInProgress) return;
 
     let isUndo = false;
@@ -347,7 +358,10 @@ function normalizeFileName(filePath: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : trimmed;
 }
 
-function matchesActiveFile(activeName: string | null, filePath: string): boolean {
+function matchesActiveFile(
+  activeName: string | null,
+  filePath: string
+): boolean {
   if (!activeName) return false;
   const active = activeName.trim().toLowerCase();
   const target = filePath.trim().toLowerCase();
@@ -375,11 +389,20 @@ function findClickableByName(name: string): HTMLElement | null {
   for (const node of candidates) {
     if (!(node instanceof HTMLElement)) continue;
     if (node.closest('#ageaf-panel-root')) continue;
-    const text = (node.getAttribute('aria-label') ?? node.getAttribute('title') ?? node.textContent ?? '')
+    const text = (
+      node.getAttribute('aria-label') ??
+      node.getAttribute('title') ??
+      node.textContent ??
+      ''
+    )
       .trim()
       .toLowerCase();
     if (!text) continue;
-    if (text === targetLower || text.endsWith(targetLower) || text.includes(targetLower)) {
+    if (
+      text === targetLower ||
+      text.endsWith(targetLower) ||
+      text.includes(targetLower)
+    ) {
       return node;
     }
   }
@@ -463,9 +486,14 @@ function chooseExactFileCandidate(
   fileId?: string
 ): ExactFileCandidate {
   if (fileId) {
-    const matching = candidates.filter((candidate) => candidate.fileId === fileId);
+    const matching = candidates.filter(
+      (candidate) => candidate.fileId === fileId
+    );
     if (matching.length === 0) {
-      throw new TransactionError('WRONG_FILE', 'Target file identity unavailable');
+      throw new TransactionError(
+        'WRONG_FILE',
+        'Target file identity unavailable'
+      );
     }
     return matching[0];
   }
@@ -473,7 +501,10 @@ function chooseExactFileCandidate(
   const identities = new Set(
     candidates.map((candidate) => candidate.fileId).filter(Boolean)
   );
-  if (identities.size === 1 && candidates.every((candidate) => candidate.fileId)) {
+  if (
+    identities.size === 1 &&
+    candidates.every((candidate) => candidate.fileId)
+  ) {
     return candidates[0];
   }
   throw new TransactionError(
@@ -484,7 +515,10 @@ function chooseExactFileCandidate(
   );
 }
 
-async function activateExactFile(filePath: string, fileId?: string): Promise<void> {
+async function activateExactFile(
+  filePath: string,
+  fileId?: string
+): Promise<void> {
   if (matchesExactFile(getActiveFileDescriptor(), filePath, fileId)) {
     return;
   }
@@ -513,7 +547,10 @@ async function restoreExactFile(
   }
 }
 
-function restoreActiveFile(desiredName: string | null, activeName: string | null) {
+function restoreActiveFile(
+  desiredName: string | null,
+  activeName: string | null
+) {
   // Best-effort restore previous active file (avoid disrupting the user).
   try {
     const desired = desiredName?.trim();
@@ -569,9 +606,12 @@ async function onFileContentRequest(event: Event) {
   const requested = String(detail.name).trim();
   const view = getTrackedCmView();
   const beforeText = view.state.sliceDoc(0, view.state.doc.length);
-  const beforeHash = `${beforeText.length}:${beforeText.slice(0, 64)}:${beforeText.slice(-64)}`;
+  const beforeHash = `${beforeText.length}:${beforeText.slice(
+    0,
+    64
+  )}:${beforeText.slice(-64)}`;
   const originalName = getActiveTabName();
-  const returnTo = (detail.returnTo ?? originalName) ?? null;
+  const returnTo = detail.returnTo ?? originalName ?? null;
 
   let ok = true;
   let error: string | undefined;
@@ -598,7 +638,9 @@ async function onFileContentRequest(event: Event) {
   // If we didn't end up on the requested file, do not claim success.
   if (ok && requested && !matchesActiveFile(activeName, requested)) {
     ok = false;
-    error = `Requested file not active (requested: ${requested}, active: ${activeName ?? 'unknown'})`;
+    error = `Requested file not active (requested: ${requested}, active: ${
+      activeName ?? 'unknown'
+    })`;
   }
 
   restoreActiveFile(returnTo, activeName);
@@ -613,7 +655,9 @@ async function onFileContentRequest(event: Event) {
     ...(error ? { error } : {}),
   };
 
-  window.dispatchEvent(new CustomEvent(FILE_RESPONSE_EVENT, { detail: response }));
+  window.dispatchEvent(
+    new CustomEvent(FILE_RESPONSE_EVENT, { detail: response })
+  );
 }
 
 function onSelectionRequest(event: Event) {
@@ -643,6 +687,7 @@ function onSelectionRequest(event: Event) {
     head,
     lineFrom: state.doc.lineAt(from).number,
     lineTo: state.doc.lineAt(inclusiveEnd).number,
+    docEpoch: documentEpoch,
   };
 
   window.dispatchEvent(new CustomEvent(RESPONSE_EVENT, { detail: response }));
@@ -671,6 +716,7 @@ function onInsertionTargetRequest(event: Event) {
       ...(activeFile.fileId ? { fileId: activeFile.fileId } : {}),
       content: view.state.sliceDoc(0, view.state.doc.length),
       offset,
+      docEpoch: documentEpoch,
       ok: true,
     };
   } catch (error) {
@@ -682,9 +728,7 @@ function onInsertionTargetRequest(event: Event) {
       offset: -1,
       ok: false,
       error:
-        error instanceof TransactionError
-          ? error.code
-          : 'EDITOR_UNAVAILABLE',
+        error instanceof TransactionError ? error.code : 'EDITOR_UNAVAILABLE',
     };
   }
 
@@ -715,6 +759,7 @@ async function onTargetFileRequest(event: Event) {
       filePath: activeFile!.filePath,
       ...(activeFile?.fileId ? { fileId: activeFile.fileId } : {}),
       content: view.state.sliceDoc(0, view.state.doc.length),
+      docEpoch: documentEpoch,
       ok: true,
     };
   } catch (error) {
@@ -744,10 +789,7 @@ async function onTargetFileRequest(event: Event) {
   );
 }
 
-const batchExecutions = new Map<
-  string,
-  Promise<ApplyEditBatchReceiptV1>
->();
+const batchExecutions = new Map<string, Promise<ApplyEditBatchReceiptV1>>();
 
 function batchFailureReceipt(
   request: ApplyEditBatchRequestV1,
@@ -841,8 +883,8 @@ async function executeEditBatch(
       error instanceof TransactionError && error.code === 'RECOVERY_REQUIRED'
         ? 'RECOVERY_REQUIRED'
         : dispatched
-          ? 'APPLY_TIMEOUT'
-          : error instanceof TransactionError
+        ? 'APPLY_TIMEOUT'
+        : error instanceof TransactionError
         ? error.code
         : sanitizeFailureCode(
             error && typeof error === 'object' && 'code' in error
@@ -963,14 +1005,20 @@ export function registerEditorBridge() {
     INSERTION_TARGET_REQUEST_EVENT,
     onInsertionTargetRequest as EventListener
   );
-  window.addEventListener(FILE_REQUEST_EVENT, onFileContentRequest as EventListener);
+  window.addEventListener(
+    FILE_REQUEST_EVENT,
+    onFileContentRequest as EventListener
+  );
   window.addEventListener(
     TARGET_FILE_REQUEST_EVENT,
     onTargetFileRequest as EventListener
   );
   window.addEventListener(BATCH_REQUEST_EVENT, onBatchRequest as EventListener);
   window.addEventListener(FILE_NAVIGATE_REQUEST_EVENT, onFileNavigateRequest as EventListener);
-  window.addEventListener(HISTORY_REQUEST_EVENT, onHistoryRequest as EventListener);
+  window.addEventListener(
+    HISTORY_REQUEST_EVENT,
+    onHistoryRequest as EventListener
+  );
   window.addEventListener(HELLO_REQUEST_EVENT, onHelloRequest as EventListener);
   window.dispatchEvent(
     new CustomEvent(BRIDGE_READY_EVENT, {

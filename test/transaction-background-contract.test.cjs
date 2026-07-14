@@ -13,7 +13,7 @@ test('MV3 background owns the durable transaction runtime', () => {
   assert.match(background, /new IndexedDbTransactionRepository\(\)/);
   assert.match(
     background,
-    /new TransactionService\(\{ repository: transactionRepository \}\)/
+    /new TransactionService\(\{\s*repository: transactionRepository,?\s*\}\)/
   );
   assert.match(background, /type === 'iris:transaction-runtime'/);
   assert.match(background, /type === 'iris:transaction-runtime-test'/);

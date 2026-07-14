@@ -89,6 +89,8 @@ type PatchReviewCardProps = {
   onAccept: () => void;
   onFeedback: () => void;
   onReject: () => void;
+  onStrictRebase?: () => void;
+  onRetarget?: () => void;
   markAnimated: () => void;
   isLightMode?: boolean;
 };
@@ -105,6 +107,8 @@ export function PatchReviewCard({
   onAccept,
   onFeedback,
   onReject,
+  onStrictRebase,
+  onRetarget,
   markAnimated,
   isLightMode,
 }: PatchReviewCardProps) {
@@ -151,15 +155,22 @@ export function PatchReviewCard({
     fileLabel = 'cursor';
   }
 
-  let title = patchReview.kind === 'insertAtCursor' ? 'Review insertion' : 'Review changes';
-  if (status === 'accepted') {
+  let title =
+    patchReview.kind === 'insertAtCursor'
+      ? 'Review insertion'
+      : 'Review changes';
+  const conflict = patchReview.conflictPreview;
+  if (conflict) {
+    title = 'Edit conflict';
+  } else if (status === 'accepted') {
     title = 'Review changes · Accepted';
   } else if (status === 'rejected') {
     title = 'Review changes · Rejected';
   }
 
   const startLineNumber =
-    (patchReview.kind === 'replaceSelection' || patchReview.kind === 'replaceRangeInFile')
+    patchReview.kind === 'replaceSelection' ||
+    patchReview.kind === 'replaceRangeInFile'
       ? patchReview.lineFrom
       : undefined;
 
@@ -206,37 +217,85 @@ export function PatchReviewCard({
           </button>
           {status === 'pending' ? (
             <>
-              <button
-                class="ageaf-panel__apply"
-                type="button"
-                disabled={!canAct || Boolean(error)}
-                onClick={onAccept}
-                title="Accept"
-                aria-label="Accept"
-              >
-                ✓
-              </button>
-              <button
-                class="ageaf-panel__apply is-secondary"
-                type="button"
-                disabled={busy}
-                onClick={onReject}
-                title="Reject"
-                aria-label="Reject"
-              >
-                ✕
-              </button>
-              {patchReview.kind !== 'insertAtCursor' ? (
-                <button
-                  class="ageaf-panel__apply is-secondary"
-                  type="button"
-                  disabled={busy}
-                  onClick={onFeedback}
-                  aria-label="Provide feedback on this change"
-                >
-                  Feedback
-                </button>
-              ) : null}
+              {conflict ? (
+                <>
+                  <button
+                    class="ageaf-panel__apply"
+                    type="button"
+                    disabled={
+                      busy || !conflict.strictRebaseAvailable || !onStrictRebase
+                    }
+                    onClick={onStrictRebase}
+                    title="Strict rebase"
+                    aria-label="Strict rebase"
+                  >
+                    Strict rebase
+                  </button>
+                  <button
+                    class="ageaf-panel__apply is-secondary"
+                    type="button"
+                    disabled={busy || !onRetarget}
+                    onClick={onRetarget}
+                    title="Retarget"
+                    aria-label="Retarget"
+                  >
+                    Retarget
+                  </button>
+                  <button
+                    class="ageaf-panel__apply is-secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={onFeedback}
+                    aria-label="Regenerate this conflicted change"
+                  >
+                    Regenerate
+                  </button>
+                  <button
+                    class="ageaf-panel__apply is-secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={onReject}
+                    title="Reject"
+                    aria-label="Reject"
+                  >
+                    ✕
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    class="ageaf-panel__apply"
+                    type="button"
+                    disabled={!canAct || Boolean(error)}
+                    onClick={onAccept}
+                    title="Accept"
+                    aria-label="Accept"
+                  >
+                    ✓
+                  </button>
+                  <button
+                    class="ageaf-panel__apply is-secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={onReject}
+                    title="Reject"
+                    aria-label="Reject"
+                  >
+                    ✕
+                  </button>
+                  {patchReview.kind !== 'insertAtCursor' ? (
+                    <button
+                      class="ageaf-panel__apply is-secondary"
+                      type="button"
+                      disabled={busy}
+                      onClick={onFeedback}
+                      aria-label="Provide feedback on this change"
+                    >
+                      Feedback
+                    </button>
+                  ) : null}
+                </>
+              )}
             </>
           ) : null}
         </div>
@@ -256,7 +315,48 @@ export function PatchReviewCard({
         </div>
       ) : null}
 
-      <div class={`ageaf-patch-review__diff-wrap${collapsed ? ' is-collapsed' : ''}`}>
+      {conflict ? (
+        <div
+          class="ageaf-patch-review__conflict"
+          data-conflict-code={conflict.conflictCode}
+        >
+          <div class="ageaf-patch-review__warning">
+            <span>
+              {conflict.strictRebaseAvailable
+                ? 'One exact anchor match is available. Rebasing creates a new review item and changes nothing in the editor.'
+                : conflict.unavailableReason === 'NO_MATCH'
+                ? 'Strict rebase unavailable: the exact recorded anchor no longer exists.'
+                : conflict.unavailableReason === 'TOO_MANY_CANDIDATES'
+                ? 'Strict rebase unavailable: more than 20 exact candidates were found.'
+                : conflict.unavailableReason === 'AMBIGUOUS'
+                ? `Strict rebase unavailable: ${conflict.candidateCount} exact candidates were found.`
+                : conflict.unavailableReason === 'WRONG_PROJECT'
+                ? 'Strict rebase unavailable: the recorded project does not match.'
+                : 'Strict rebase unavailable: the recorded file identity does not match.'}
+            </span>
+          </div>
+          <div class="ageaf-patch-review__conflict-grid">
+            <section>
+              <strong>Recorded expected</strong>
+              <pre>{conflict.expectedText || '(insertion boundary)'}</pre>
+            </section>
+            <section>
+              <strong>Current observed</strong>
+              <pre>{conflict.currentObservedText || '(unavailable)'}</pre>
+            </section>
+            <section>
+              <strong>Proposed</strong>
+              <pre>{conflict.proposedText}</pre>
+            </section>
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        class={`ageaf-patch-review__diff-wrap${
+          collapsed ? ' is-collapsed' : ''
+        }`}
+      >
         {patchReview.kind === 'replaceRangeInFile' ? (
           <DiffReview
             oldText={patchReview.expectedOldText}
@@ -304,66 +404,68 @@ export function PatchReviewCard({
         </button>
       ) : null}
 
-      {showModal ? createPortal(
-        <div class="ageaf-diff-modal__backdrop">
-          <div
-            class="ageaf-diff-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              class="ageaf-diff-modal__header"
-            >
-              <div class="ageaf-diff-modal__title">
-                {title}
-                {fileLabel ? <span> · {fileLabel}</span> : null}
-                <span class="ageaf-diff-modal__shortcut-hint">ESC to close</span>
-              </div>
-              <button
-                class="ageaf-diff-modal__close"
-                type="button"
-                onClick={() => setShowModal(false)}
-                title="Close (ESC)"
-                aria-label="Close diff modal"
+      {showModal
+        ? createPortal(
+            <div class="ageaf-diff-modal__backdrop">
+              <div
+                class="ageaf-diff-modal"
+                onClick={(e) => e.stopPropagation()}
               >
-                <CloseIcon />
-              </button>
-            </div>
-            <div class="ageaf-diff-modal__content">
-              {patchReview.kind === 'replaceRangeInFile' ? (
-                <DiffReview
-                  oldText={patchReview.expectedOldText}
-                  newText={patchReview.text}
-                  fileName={patchReview.filePath}
-                  animate={false}
-                  wrap={true}
-                  startLineNumber={startLineNumber}
-                  isLightMode={isLightMode}
-                />
-              ) : patchReview.kind === 'replaceSelection' ? (
-                <DiffReview
-                  oldText={patchReview.selection}
-                  newText={patchReview.text}
-                  fileName={patchReview.fileName ?? undefined}
-                  animate={false}
-                  wrap={true}
-                  startLineNumber={startLineNumber}
-                  isLightMode={isLightMode}
-                />
-              ) : patchReview.kind === 'insertAtCursor' ? (
-                <DiffReview
-                  oldText=""
-                  newText={patchReview.text}
-                  fileName="cursor"
-                  animate={false}
-                  wrap={true}
-                  isLightMode={isLightMode}
-                />
-              ) : null}
-            </div>
-          </div>
-        </div>,
-        document.body
-      ) : null}
+                <div class="ageaf-diff-modal__header">
+                  <div class="ageaf-diff-modal__title">
+                    {title}
+                    {fileLabel ? <span> · {fileLabel}</span> : null}
+                    <span class="ageaf-diff-modal__shortcut-hint">
+                      ESC to close
+                    </span>
+                  </div>
+                  <button
+                    class="ageaf-diff-modal__close"
+                    type="button"
+                    onClick={() => setShowModal(false)}
+                    title="Close (ESC)"
+                    aria-label="Close diff modal"
+                  >
+                    <CloseIcon />
+                  </button>
+                </div>
+                <div class="ageaf-diff-modal__content">
+                  {patchReview.kind === 'replaceRangeInFile' ? (
+                    <DiffReview
+                      oldText={patchReview.expectedOldText}
+                      newText={patchReview.text}
+                      fileName={patchReview.filePath}
+                      animate={false}
+                      wrap={true}
+                      startLineNumber={startLineNumber}
+                      isLightMode={isLightMode}
+                    />
+                  ) : patchReview.kind === 'replaceSelection' ? (
+                    <DiffReview
+                      oldText={patchReview.selection}
+                      newText={patchReview.text}
+                      fileName={patchReview.fileName ?? undefined}
+                      animate={false}
+                      wrap={true}
+                      startLineNumber={startLineNumber}
+                      isLightMode={isLightMode}
+                    />
+                  ) : patchReview.kind === 'insertAtCursor' ? (
+                    <DiffReview
+                      oldText=""
+                      newText={patchReview.text}
+                      fileName="cursor"
+                      animate={false}
+                      wrap={true}
+                      isLightMode={isLightMode}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

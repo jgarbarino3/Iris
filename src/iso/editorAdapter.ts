@@ -64,6 +64,7 @@ export type FileContentResult = {
   content: string;
   activeName: string | null;
   fileId?: string;
+  docEpoch?: number;
   ok: boolean;
   error?: string;
 };
@@ -81,6 +82,7 @@ export type InsertionTargetResultV1 = {
   fileId?: string;
   content: string;
   offset: number;
+  docEpoch?: number;
   ok: boolean;
   error?: string;
 };
@@ -91,6 +93,7 @@ export type TargetFileResultV1 = {
   filePath: string;
   fileId?: string;
   content: string;
+  docEpoch?: number;
   ok: boolean;
   error?: string;
 };

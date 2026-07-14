@@ -1,3 +1,5 @@
+import type { ConflictPreviewV1 } from '../../transactions/contracts';
+
 export type ProviderId = 'claude' | 'codex' | 'pi';
 
 export type CoTThinkingItem = {
@@ -58,52 +60,58 @@ export type StoredPatchReviewOutcome =
 
 export type StoredPatchReview =
   | {
-    kind: 'replaceSelection';
-    selection: string;
-    from: number;
-    to: number;
-    lineFrom?: number;
-    lineTo?: number;
-    text: string;
-    status?: StoredPatchReviewStatus;
-    fileName?: string;
-    hasAnimated?: boolean;
-    transactionId?: string;
-    transactionRevision?: number;
-    projectId?: string;
-    transactionError?: string;
-    transactionOutcome?: StoredPatchReviewOutcome;
-    operationId?: string;
-  }
+      kind: 'replaceSelection';
+      selection: string;
+      from: number;
+      to: number;
+      lineFrom?: number;
+      lineTo?: number;
+      text: string;
+      status?: StoredPatchReviewStatus;
+      fileName?: string;
+      hasAnimated?: boolean;
+      transactionId?: string;
+      transactionRevision?: number;
+      projectId?: string;
+      transactionError?: string;
+      transactionOutcome?: StoredPatchReviewOutcome;
+      operationId?: string;
+      conflictPreview?: ConflictPreviewV1;
+      successorTransactionId?: string;
+    }
   | {
-    kind: 'insertAtCursor';
-    text: string;
-    status?: StoredPatchReviewStatus;
-    hasAnimated?: boolean;
-    transactionId?: string;
-    transactionRevision?: number;
-    projectId?: string;
-    transactionError?: string;
-    transactionOutcome?: StoredPatchReviewOutcome;
-    operationId?: string;
-  }
+      kind: 'insertAtCursor';
+      text: string;
+      status?: StoredPatchReviewStatus;
+      hasAnimated?: boolean;
+      transactionId?: string;
+      transactionRevision?: number;
+      projectId?: string;
+      transactionError?: string;
+      transactionOutcome?: StoredPatchReviewOutcome;
+      operationId?: string;
+      conflictPreview?: ConflictPreviewV1;
+      successorTransactionId?: string;
+    }
   | {
-    kind: 'replaceRangeInFile';
-    filePath: string;
-    expectedOldText: string;
-    text: string;
-    from?: number;
-    to?: number;
-    lineFrom?: number;
-    status?: StoredPatchReviewStatus;
-    hasAnimated?: boolean;
-    transactionId?: string;
-    transactionRevision?: number;
-    projectId?: string;
-    transactionError?: string;
-    transactionOutcome?: StoredPatchReviewOutcome;
-    operationId?: string;
-  };
+      kind: 'replaceRangeInFile';
+      filePath: string;
+      expectedOldText: string;
+      text: string;
+      from?: number;
+      to?: number;
+      lineFrom?: number;
+      status?: StoredPatchReviewStatus;
+      hasAnimated?: boolean;
+      transactionId?: string;
+      transactionRevision?: number;
+      projectId?: string;
+      transactionError?: string;
+      transactionOutcome?: StoredPatchReviewOutcome;
+      operationId?: string;
+      conflictPreview?: ConflictPreviewV1;
+      successorTransactionId?: string;
+    };
 
 export type StoredMessage = {
   role: 'system' | 'assistant' | 'user';
@@ -160,7 +168,9 @@ const STORAGE_KEY_PREFIX = 'ageaf-chat-v1:project:';
 const MAX_CONVERSATIONS_PER_PROVIDER = 8;
 const MAX_MESSAGES_PER_CONVERSATION = 200;
 
-export function getOverleafProjectIdFromPathname(pathname: string): string | null {
+export function getOverleafProjectIdFromPathname(
+  pathname: string
+): string | null {
   const segments = pathname.split('/').filter(Boolean);
   if (segments[0] !== 'project') return null;
   const projectId = segments[1];
@@ -199,8 +209,8 @@ export function createConversation(provider: ProviderId): StoredConversation {
     ...(provider === 'codex'
       ? { providerState: { codex: {} } }
       : provider === 'pi'
-        ? { providerState: { pi: {} } }
-        : { providerState: { claude: {} } }),
+      ? { providerState: { pi: {} } }
+      : { providerState: { claude: {} } }),
   };
 }
 
@@ -209,14 +219,23 @@ function coerceProvider(value: any): ProviderId | null {
   return null;
 }
 
-function normalizeStoredImageAttachment(raw: any): StoredImageAttachment | null {
+function normalizeStoredImageAttachment(
+  raw: any
+): StoredImageAttachment | null {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' ? raw.id : null;
   const name = typeof raw.name === 'string' ? raw.name : null;
   const mediaType = typeof raw.mediaType === 'string' ? raw.mediaType : null;
   const data = typeof raw.data === 'string' ? raw.data : null;
   const size = Number(raw.size ?? NaN);
-  if (!id || !name || !mediaType || !data || !Number.isFinite(size) || size < 0) {
+  if (
+    !id ||
+    !name ||
+    !mediaType ||
+    !data ||
+    !Number.isFinite(size) ||
+    size < 0
+  ) {
     return null;
   }
   return { id, name, mediaType, data, size };
@@ -242,10 +261,20 @@ function normalizeStoredFileAttachment(raw: any): StoredFileAttachment | null {
   ) {
     return null;
   }
-  return { id, name, ext, sizeBytes, lineCount, ...(pathValue ? { path: pathValue } : {}), ...(mime ? { mime } : {}) };
+  return {
+    id,
+    name,
+    ext,
+    sizeBytes,
+    lineCount,
+    ...(pathValue ? { path: pathValue } : {}),
+    ...(mime ? { mime } : {}),
+  };
 }
 
-function normalizeStoredDocumentAttachment(raw: any): StoredDocumentAttachment | null {
+function normalizeStoredDocumentAttachment(
+  raw: any
+): StoredDocumentAttachment | null {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' ? raw.id : null;
   const name = typeof raw.name === 'string' ? raw.name : null;
@@ -282,9 +311,13 @@ function normalizeCoTItem(raw: any): CoTItem | null {
       input: typeof raw.input === 'string' ? raw.input : undefined,
       phase,
       message: typeof raw.message === 'string' ? raw.message : undefined,
-      description: typeof raw.description === 'string' ? raw.description.slice(0, 120) : undefined,
+      description:
+        typeof raw.description === 'string'
+          ? raw.description.slice(0, 120)
+          : undefined,
       startedAt: typeof raw.startedAt === 'number' ? raw.startedAt : undefined,
-      completedAt: typeof raw.completedAt === 'number' ? raw.completedAt : undefined,
+      completedAt:
+        typeof raw.completedAt === 'number' ? raw.completedAt : undefined,
     };
   }
   return null;
@@ -296,8 +329,10 @@ function normalizeStoredMessage(raw: any): StoredMessage | null {
   if (role !== 'system' && role !== 'assistant' && role !== 'user') return null;
   const content = typeof raw.content === 'string' ? raw.content : null;
   if (content == null) return null;
-  const displayContent = typeof raw.displayContent === 'string' ? raw.displayContent : undefined;
-  const statusLine = typeof raw.statusLine === 'string' ? raw.statusLine : undefined;
+  const displayContent =
+    typeof raw.displayContent === 'string' ? raw.displayContent : undefined;
+  const statusLine =
+    typeof raw.statusLine === 'string' ? raw.statusLine : undefined;
 
   const cotRaw = Array.isArray(raw.cot) ? raw.cot : [];
   const cot = cotRaw
@@ -322,11 +357,14 @@ function normalizeStoredMessage(raw: any): StoredMessage | null {
   const documents = documentsRaw
     .map((entry: unknown) => normalizeStoredDocumentAttachment(entry))
     .filter(
-      (entry: StoredDocumentAttachment | null): entry is StoredDocumentAttachment =>
-        Boolean(entry)
+      (
+        entry: StoredDocumentAttachment | null
+      ): entry is StoredDocumentAttachment => Boolean(entry)
     );
 
-  const patchReview = normalizeStoredPatchReview(raw.patchReview ?? raw.patch_review);
+  const patchReview = normalizeStoredPatchReview(
+    raw.patchReview ?? raw.patch_review
+  );
   return {
     role,
     content,
@@ -340,7 +378,9 @@ function normalizeStoredMessage(raw: any): StoredMessage | null {
   };
 }
 
-function normalizePatchReviewStatus(raw: any): StoredPatchReviewStatus | undefined {
+function normalizePatchReviewStatus(
+  raw: any
+): StoredPatchReviewStatus | undefined {
   if (raw === 'pending' || raw === 'accepted' || raw === 'rejected') return raw;
   return undefined;
 }
@@ -359,13 +399,70 @@ function normalizePatchReviewOutcome(
   return undefined;
 }
 
+function normalizeConflictPreview(raw: any): ConflictPreviewV1 | undefined {
+  if (
+    !raw ||
+    typeof raw !== 'object' ||
+    raw.schemaVersion !== 1 ||
+    typeof raw.projectId !== 'string' ||
+    !raw.target ||
+    typeof raw.target !== 'object' ||
+    typeof raw.target.filePath !== 'string' ||
+    !Number.isInteger(raw.target.from) ||
+    !Number.isInteger(raw.target.to) ||
+    typeof raw.expectedText !== 'string' ||
+    typeof raw.currentObservedText !== 'string' ||
+    typeof raw.proposedText !== 'string' ||
+    typeof raw.baseContentSha256 !== 'string' ||
+    typeof raw.conflictCode !== 'string' ||
+    !Number.isInteger(raw.candidateCount) ||
+    typeof raw.candidateLimitExceeded !== 'boolean' ||
+    typeof raw.strictRebaseAvailable !== 'boolean' ||
+    !Number.isFinite(Number(raw.capturedAt))
+  ) {
+    return undefined;
+  }
+  return {
+    schemaVersion: 1,
+    projectId: raw.projectId,
+    target: {
+      filePath: raw.target.filePath,
+      ...(typeof raw.target.fileId === 'string'
+        ? { fileId: raw.target.fileId }
+        : {}),
+      from: raw.target.from,
+      to: raw.target.to,
+    },
+    expectedText: raw.expectedText,
+    currentObservedText: raw.currentObservedText,
+    proposedText: raw.proposedText,
+    baseContentSha256: raw.baseContentSha256,
+    ...(typeof raw.currentContentSha256 === 'string'
+      ? { currentContentSha256: raw.currentContentSha256 }
+      : {}),
+    conflictCode: raw.conflictCode,
+    candidateCount: raw.candidateCount,
+    candidateLimitExceeded: raw.candidateLimitExceeded,
+    strictRebaseAvailable: raw.strictRebaseAvailable,
+    ...(typeof raw.unavailableReason === 'string'
+      ? { unavailableReason: raw.unavailableReason }
+      : {}),
+    capturedAt: Number(raw.capturedAt),
+    ...(Number.isInteger(raw.docEpoch) ? { docEpoch: raw.docEpoch } : {}),
+  } as ConflictPreviewV1;
+}
+
 function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
   if (!raw || typeof raw !== 'object') return null;
   const kind = raw.kind;
   const status = normalizePatchReviewStatus(raw.status);
-  const transactionOutcome = normalizePatchReviewOutcome(raw.transactionOutcome);
+  const transactionOutcome = normalizePatchReviewOutcome(
+    raw.transactionOutcome
+  );
+  const conflictPreview = normalizeConflictPreview(raw.conflictPreview);
   const hasAnimatedRaw = raw.hasAnimated ?? raw.has_animated;
-  const hasAnimated = typeof hasAnimatedRaw === 'boolean' ? hasAnimatedRaw : undefined;
+  const hasAnimated =
+    typeof hasAnimatedRaw === 'boolean' ? hasAnimatedRaw : undefined;
 
   if (kind === 'replaceSelection') {
     const selection = typeof raw.selection === 'string' ? raw.selection : null;
@@ -375,10 +472,23 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
     const lineFromRaw = raw.lineFrom ?? raw.line_from;
     const lineToRaw = raw.lineTo ?? raw.line_to;
     const lineFrom =
-      lineFromRaw === undefined ? undefined : Number.isFinite(Number(lineFromRaw)) ? Number(lineFromRaw) : undefined;
+      lineFromRaw === undefined
+        ? undefined
+        : Number.isFinite(Number(lineFromRaw))
+        ? Number(lineFromRaw)
+        : undefined;
     const lineTo =
-      lineToRaw === undefined ? undefined : Number.isFinite(Number(lineToRaw)) ? Number(lineToRaw) : undefined;
-    const fileName = typeof raw.fileName === 'string' ? raw.fileName : typeof raw.file_name === 'string' ? raw.file_name : undefined;
+      lineToRaw === undefined
+        ? undefined
+        : Number.isFinite(Number(lineToRaw))
+        ? Number(lineToRaw)
+        : undefined;
+    const fileName =
+      typeof raw.fileName === 'string'
+        ? raw.fileName
+        : typeof raw.file_name === 'string'
+        ? raw.file_name
+        : undefined;
 
     if (
       !selection ||
@@ -417,6 +527,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.operationId === 'string'
         ? { operationId: raw.operationId }
         : {}),
+      ...(conflictPreview ? { conflictPreview } : {}),
+      ...(typeof raw.successorTransactionId === 'string'
+        ? { successorTransactionId: raw.successorTransactionId }
+        : {}),
     };
   }
 
@@ -444,17 +558,26 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.operationId === 'string'
         ? { operationId: raw.operationId }
         : {}),
+      ...(conflictPreview ? { conflictPreview } : {}),
+      ...(typeof raw.successorTransactionId === 'string'
+        ? { successorTransactionId: raw.successorTransactionId }
+        : {}),
     };
   }
 
   if (kind === 'replaceRangeInFile') {
-    const filePath = typeof raw.filePath === 'string' ? raw.filePath : typeof raw.file_path === 'string' ? raw.file_path : null;
+    const filePath =
+      typeof raw.filePath === 'string'
+        ? raw.filePath
+        : typeof raw.file_path === 'string'
+        ? raw.file_path
+        : null;
     const expectedOldText =
       typeof raw.expectedOldText === 'string'
         ? raw.expectedOldText
         : typeof raw.expected_old_text === 'string'
-          ? raw.expected_old_text
-          : null;
+        ? raw.expected_old_text
+        : null;
     const text = typeof raw.text === 'string' ? raw.text : null;
     const fromRaw = raw.from;
     const toRaw = raw.to;
@@ -492,6 +615,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.operationId === 'string'
         ? { operationId: raw.operationId }
         : {}),
+      ...(conflictPreview ? { conflictPreview } : {}),
+      ...(typeof raw.successorTransactionId === 'string'
+        ? { successorTransactionId: raw.successorTransactionId }
+        : {}),
     };
   }
 
@@ -510,17 +637,18 @@ function normalizeStoredContextUsage(raw: any): StoredContextUsage | null {
     contextWindowCandidate === null
       ? null
       : Number.isFinite(contextWindowCandidate) && contextWindowCandidate > 0
-        ? contextWindowCandidate
-        : null;
+      ? contextWindowCandidate
+      : null;
 
   const percentageRaw = raw.percentage ?? raw.percent ?? null;
-  const percentageCandidate = percentageRaw === null ? null : Number(percentageRaw);
+  const percentageCandidate =
+    percentageRaw === null ? null : Number(percentageRaw);
   const percentage =
     percentageCandidate === null
       ? null
       : Number.isFinite(percentageCandidate)
-        ? percentageCandidate
-        : null;
+      ? percentageCandidate
+      : null;
 
   const updatedAt = Number(raw.updatedAt ?? raw.updated_at ?? 0);
   if (!Number.isFinite(updatedAt) || updatedAt <= 0) return null;
@@ -533,7 +661,10 @@ function normalizeStoredContextUsage(raw: any): StoredContextUsage | null {
   };
 }
 
-function normalizeConversation(raw: any, provider: ProviderId): StoredConversation | null {
+function normalizeConversation(
+  raw: any,
+  provider: ProviderId
+): StoredConversation | null {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' ? raw.id : null;
   if (!id) return null;
@@ -543,35 +674,39 @@ function normalizeConversation(raw: any, provider: ProviderId): StoredConversati
   const messagesRaw = Array.isArray(raw.messages) ? raw.messages : [];
   const messages = messagesRaw
     .map((entry: any) => normalizeStoredMessage(entry))
-    .filter((entry: StoredMessage | null): entry is StoredMessage => Boolean(entry));
+    .filter((entry: StoredMessage | null): entry is StoredMessage =>
+      Boolean(entry)
+    );
   const providerStateRaw = raw.providerState ?? raw.provider_state ?? null;
   const codexUsage =
     provider === 'codex'
       ? normalizeStoredContextUsage(
-        providerStateRaw?.codex?.lastUsage ?? providerStateRaw?.codex?.last_usage
-      )
+          providerStateRaw?.codex?.lastUsage ??
+            providerStateRaw?.codex?.last_usage
+        )
       : null;
   const claudeUsage =
     provider === 'claude'
       ? normalizeStoredContextUsage(
-        providerStateRaw?.claude?.lastUsage ?? providerStateRaw?.claude?.last_usage
-      )
+          providerStateRaw?.claude?.lastUsage ??
+            providerStateRaw?.claude?.last_usage
+        )
       : null;
   const piUsage =
     provider === 'pi'
       ? normalizeStoredContextUsage(
-        providerStateRaw?.pi?.lastUsage ?? providerStateRaw?.pi?.last_usage
-      )
+          providerStateRaw?.pi?.lastUsage ?? providerStateRaw?.pi?.last_usage
+        )
       : null;
   const threadId =
     provider === 'codex'
       ? typeof providerStateRaw?.codex?.threadId === 'string'
         ? providerStateRaw.codex.threadId
         : typeof providerStateRaw?.codex?.thread_id === 'string'
-          ? providerStateRaw.codex.thread_id
-          : typeof raw.threadId === 'string'
-            ? raw.threadId
-            : undefined
+        ? providerStateRaw.codex.thread_id
+        : typeof raw.threadId === 'string'
+        ? raw.threadId
+        : undefined
       : undefined;
 
   const providerState: StoredConversation['providerState'] = {};
@@ -591,19 +726,29 @@ function normalizeConversation(raw: any, provider: ProviderId): StoredConversati
     id,
     provider,
     createdAt,
-    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : createdAt,
+    updatedAt:
+      Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : createdAt,
     messages,
     ...(Object.keys(providerState).length > 0 ? { providerState } : {}),
   };
 }
 
-function normalizeProviderState(raw: any, provider: ProviderId): StoredProviderState {
+function normalizeProviderState(
+  raw: any,
+  provider: ProviderId
+): StoredProviderState {
   const activeConversationId =
-    typeof raw?.activeConversationId === 'string' ? raw.activeConversationId : null;
-  const conversationsRaw = Array.isArray(raw?.conversations) ? raw.conversations : [];
+    typeof raw?.activeConversationId === 'string'
+      ? raw.activeConversationId
+      : null;
+  const conversationsRaw = Array.isArray(raw?.conversations)
+    ? raw.conversations
+    : [];
   const conversations = conversationsRaw
     .map((entry: any) => normalizeConversation(entry, provider))
-    .filter((entry: StoredConversation | null): entry is StoredConversation => Boolean(entry))
+    .filter((entry: StoredConversation | null): entry is StoredConversation =>
+      Boolean(entry)
+    )
     .slice(0, MAX_CONVERSATIONS_PER_PROVIDER);
   return { activeConversationId, conversations };
 }
@@ -629,7 +774,10 @@ export function ensureActiveConversation(
   state: StoredProjectChat,
   provider: ProviderId
 ): { state: StoredProjectChat; conversation: StoredConversation } {
-  const providerState = state.providers[provider] ?? { activeConversationId: null, conversations: [] };
+  const providerState = state.providers[provider] ?? {
+    activeConversationId: null,
+    conversations: [],
+  };
   const activeId = providerState.activeConversationId;
   const existing = activeId
     ? providerState.conversations.find((conv) => conv.id === activeId)
@@ -639,16 +787,19 @@ export function ensureActiveConversation(
       state.activeProvider === provider
         ? state
         : {
-          ...state,
-          activeProvider: provider,
-        };
+            ...state,
+            activeProvider: provider,
+          };
     return { state: nextState, conversation: existing };
   }
 
   const conversation = createConversation(provider);
   const nextProviderState: StoredProviderState = {
     activeConversationId: conversation.id,
-    conversations: [conversation, ...providerState.conversations].slice(0, MAX_CONVERSATIONS_PER_PROVIDER),
+    conversations: [conversation, ...providerState.conversations].slice(
+      0,
+      MAX_CONVERSATIONS_PER_PROVIDER
+    ),
   };
 
   return {
@@ -667,11 +818,21 @@ export function ensureActiveConversation(
 export function startNewConversation(
   state: StoredProjectChat,
   provider: ProviderId
-): { state: StoredProjectChat; conversation: StoredConversation; evicted: string[] } {
-  const providerState = state.providers[provider] ?? { activeConversationId: null, conversations: [] };
+): {
+  state: StoredProjectChat;
+  conversation: StoredConversation;
+  evicted: string[];
+} {
+  const providerState = state.providers[provider] ?? {
+    activeConversationId: null,
+    conversations: [],
+  };
   const conversation = createConversation(provider);
   const allConversations = [conversation, ...providerState.conversations];
-  const nextConversations = allConversations.slice(0, MAX_CONVERSATIONS_PER_PROVIDER);
+  const nextConversations = allConversations.slice(
+    0,
+    MAX_CONVERSATIONS_PER_PROVIDER
+  );
 
   // Track conversations that were evicted (beyond the max limit)
   const evictedIds = allConversations
@@ -702,7 +863,11 @@ export function setActiveConversation(
   conversationId: string
 ): StoredProjectChat {
   const providerState = state.providers[provider];
-  if (!providerState.conversations.some((conversation) => conversation.id === conversationId)) {
+  if (
+    !providerState.conversations.some(
+      (conversation) => conversation.id === conversationId
+    )
+  ) {
     return state;
   }
 
@@ -755,7 +920,9 @@ export function setConversationMessages(
   messages: StoredMessage[]
 ): StoredProjectChat {
   const providerState = state.providers[provider];
-  const trimmed = messages.slice(Math.max(0, messages.length - MAX_MESSAGES_PER_CONVERSATION));
+  const trimmed = messages.slice(
+    Math.max(0, messages.length - MAX_MESSAGES_PER_CONVERSATION)
+  );
   const now = Date.now();
   const nextConversations = providerState.conversations.map((conversation) => {
     if (conversation.id !== conversationId) return conversation;
@@ -849,7 +1016,9 @@ export function setConversationContextUsage(
   };
 }
 
-export async function loadProjectChat(projectId: string): Promise<StoredProjectChat> {
+export async function loadProjectChat(
+  projectId: string
+): Promise<StoredProjectChat> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     return createEmptyProjectChat();
   }
@@ -860,21 +1029,30 @@ export async function loadProjectChat(projectId: string): Promise<StoredProjectC
     return normalized ?? createEmptyProjectChat();
   } catch (error) {
     // Extension context invalidated - return empty chat
-    if (error instanceof Error && error.message.includes('Extension context invalidated')) {
+    if (
+      error instanceof Error &&
+      error.message.includes('Extension context invalidated')
+    ) {
       return createEmptyProjectChat();
     }
     throw error;
   }
 }
 
-export async function saveProjectChat(projectId: string, state: StoredProjectChat): Promise<void> {
+export async function saveProjectChat(
+  projectId: string,
+  state: StoredProjectChat
+): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
   try {
     const key = getProjectChatStorageKey(projectId);
     await chrome.storage.local.set({ [key]: state });
   } catch (error) {
     // Extension context invalidated - ignore silently
-    if (error instanceof Error && error.message.includes('Extension context invalidated')) {
+    if (
+      error instanceof Error &&
+      error.message.includes('Extension context invalidated')
+    ) {
       return;
     }
     throw error;

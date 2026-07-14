@@ -4,9 +4,11 @@ import './webpackPublicPath';
 import { createEditorAdapter } from './editorAdapter';
 import { mountPanel, unmountPanel } from './panel/Panel';
 import {
+  buildAnchoredInsertionProposal,
   sha256Text,
   transactionToBatchRequest,
 } from '../transactions/anchoredInsertion';
+import { buildDurableReplacementProposal } from '../transactions/durableReplacement';
 import { planFileAtomicBatch } from '../transactions/fileBatch';
 import type {
   ApplyEditBatchRequestV1,
@@ -31,27 +33,132 @@ function ensureKatexFontFaces() {
   // (e.g. https://www.overleaf.com/project/...), which causes 404s for KaTeX fonts.
   // We override KaTeX @font-face rules with absolute chrome-extension:// URLs.
   const fontUrl = (name: string) => chrome.runtime.getURL(`fonts/${name}`);
-  const faces: Array<{ family: string; weight: number; style: string; fileBase: string }> = [
-    { family: 'KaTeX_AMS', weight: 400, style: 'normal', fileBase: 'KaTeX_AMS-Regular' },
-    { family: 'KaTeX_Caligraphic', weight: 700, style: 'normal', fileBase: 'KaTeX_Caligraphic-Bold' },
-    { family: 'KaTeX_Caligraphic', weight: 400, style: 'normal', fileBase: 'KaTeX_Caligraphic-Regular' },
-    { family: 'KaTeX_Fraktur', weight: 700, style: 'normal', fileBase: 'KaTeX_Fraktur-Bold' },
-    { family: 'KaTeX_Fraktur', weight: 400, style: 'normal', fileBase: 'KaTeX_Fraktur-Regular' },
-    { family: 'KaTeX_Main', weight: 700, style: 'normal', fileBase: 'KaTeX_Main-Bold' },
-    { family: 'KaTeX_Main', weight: 700, style: 'italic', fileBase: 'KaTeX_Main-BoldItalic' },
-    { family: 'KaTeX_Main', weight: 400, style: 'italic', fileBase: 'KaTeX_Main-Italic' },
-    { family: 'KaTeX_Main', weight: 400, style: 'normal', fileBase: 'KaTeX_Main-Regular' },
-    { family: 'KaTeX_Math', weight: 700, style: 'italic', fileBase: 'KaTeX_Math-BoldItalic' },
-    { family: 'KaTeX_Math', weight: 400, style: 'italic', fileBase: 'KaTeX_Math-Italic' },
-    { family: 'KaTeX_SansSerif', weight: 700, style: 'normal', fileBase: 'KaTeX_SansSerif-Bold' },
-    { family: 'KaTeX_SansSerif', weight: 400, style: 'italic', fileBase: 'KaTeX_SansSerif-Italic' },
-    { family: 'KaTeX_SansSerif', weight: 400, style: 'normal', fileBase: 'KaTeX_SansSerif-Regular' },
-    { family: 'KaTeX_Script', weight: 400, style: 'normal', fileBase: 'KaTeX_Script-Regular' },
-    { family: 'KaTeX_Size1', weight: 400, style: 'normal', fileBase: 'KaTeX_Size1-Regular' },
-    { family: 'KaTeX_Size2', weight: 400, style: 'normal', fileBase: 'KaTeX_Size2-Regular' },
-    { family: 'KaTeX_Size3', weight: 400, style: 'normal', fileBase: 'KaTeX_Size3-Regular' },
-    { family: 'KaTeX_Size4', weight: 400, style: 'normal', fileBase: 'KaTeX_Size4-Regular' },
-    { family: 'KaTeX_Typewriter', weight: 400, style: 'normal', fileBase: 'KaTeX_Typewriter-Regular' },
+  const faces: Array<{
+    family: string;
+    weight: number;
+    style: string;
+    fileBase: string;
+  }> = [
+    {
+      family: 'KaTeX_AMS',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_AMS-Regular',
+    },
+    {
+      family: 'KaTeX_Caligraphic',
+      weight: 700,
+      style: 'normal',
+      fileBase: 'KaTeX_Caligraphic-Bold',
+    },
+    {
+      family: 'KaTeX_Caligraphic',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Caligraphic-Regular',
+    },
+    {
+      family: 'KaTeX_Fraktur',
+      weight: 700,
+      style: 'normal',
+      fileBase: 'KaTeX_Fraktur-Bold',
+    },
+    {
+      family: 'KaTeX_Fraktur',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Fraktur-Regular',
+    },
+    {
+      family: 'KaTeX_Main',
+      weight: 700,
+      style: 'normal',
+      fileBase: 'KaTeX_Main-Bold',
+    },
+    {
+      family: 'KaTeX_Main',
+      weight: 700,
+      style: 'italic',
+      fileBase: 'KaTeX_Main-BoldItalic',
+    },
+    {
+      family: 'KaTeX_Main',
+      weight: 400,
+      style: 'italic',
+      fileBase: 'KaTeX_Main-Italic',
+    },
+    {
+      family: 'KaTeX_Main',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Main-Regular',
+    },
+    {
+      family: 'KaTeX_Math',
+      weight: 700,
+      style: 'italic',
+      fileBase: 'KaTeX_Math-BoldItalic',
+    },
+    {
+      family: 'KaTeX_Math',
+      weight: 400,
+      style: 'italic',
+      fileBase: 'KaTeX_Math-Italic',
+    },
+    {
+      family: 'KaTeX_SansSerif',
+      weight: 700,
+      style: 'normal',
+      fileBase: 'KaTeX_SansSerif-Bold',
+    },
+    {
+      family: 'KaTeX_SansSerif',
+      weight: 400,
+      style: 'italic',
+      fileBase: 'KaTeX_SansSerif-Italic',
+    },
+    {
+      family: 'KaTeX_SansSerif',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_SansSerif-Regular',
+    },
+    {
+      family: 'KaTeX_Script',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Script-Regular',
+    },
+    {
+      family: 'KaTeX_Size1',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Size1-Regular',
+    },
+    {
+      family: 'KaTeX_Size2',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Size2-Regular',
+    },
+    {
+      family: 'KaTeX_Size3',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Size3-Regular',
+    },
+    {
+      family: 'KaTeX_Size4',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Size4-Regular',
+    },
+    {
+      family: 'KaTeX_Typewriter',
+      weight: 400,
+      style: 'normal',
+      fileBase: 'KaTeX_Typewriter-Regular',
+    },
   ];
 
   const css = faces
@@ -77,13 +184,14 @@ function findLayoutHost(): HTMLElement | null {
     '#root',
     'body > .ide',
     'body > .content',
-    'body > div'
+    'body > div',
   ];
 
   for (const selector of selectors) {
     const candidate = document.querySelector(selector);
     if (!(candidate instanceof HTMLElement)) continue;
-    if (candidate.id === LAYOUT_ID || candidate.id === 'ageaf-panel-root') continue;
+    if (candidate.id === LAYOUT_ID || candidate.id === 'ageaf-panel-root')
+      continue;
     return candidate;
   }
 
@@ -148,7 +256,8 @@ void editorAdapter.refreshHealth();
 window.addEventListener('focus', () => void editorAdapter.refreshHealth());
 window.addEventListener('pageshow', () => void editorAdapter.refreshHealth());
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') void editorAdapter.refreshHealth();
+  if (document.visibilityState === 'visible')
+    void editorAdapter.refreshHealth();
 });
 window.setInterval(() => void editorAdapter.refreshHealth(), 10_000);
 
@@ -325,11 +434,171 @@ try {
           filePath: file?.filePath ?? target.filePath,
           ...(file?.fileId ? { fileId: file.fileId } : {}),
           content: typeof file?.content === 'string' ? file.content : '',
+          ...(Number.isInteger(file?.docEpoch)
+            ? { docEpoch: file.docEpoch }
+            : {}),
           ...(!file?.ok && file?.error
             ? { error: { code: sanitizeFailureCode(file.error) } }
             : {}),
         }))
         .then(sendResponse);
+      return true;
+    }
+    if (request?.type === 'iris:transaction:capture-retarget') {
+      const transaction = request.transaction as EditTransactionV1;
+      void (async () => {
+        const projectId = window.location.pathname.match(
+          /^\/project\/([^/?#]+)/
+        )?.[1];
+        if (!projectId || projectId !== transaction.projectId) {
+          throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
+        }
+        if (transaction.intent === 'insert') {
+          const captured = await editorAdapter.captureInsertionTarget();
+          if (
+            !captured?.ok ||
+            captured.projectId !== projectId ||
+            !captured.filePath ||
+            typeof captured.content !== 'string' ||
+            !Number.isInteger(captured.offset) ||
+            captured.offset < 0
+          ) {
+            throw new TransactionError(
+              sanitizeFailureCode(captured?.error),
+              'Insertion retarget identity unavailable'
+            );
+          }
+          const verified = await editorAdapter.requestTargetFile({
+            projectId,
+            filePath: captured.filePath,
+            ...(captured.fileId ? { fileId: captured.fileId } : {}),
+          });
+          if (
+            !verified?.ok ||
+            verified.projectId !== captured.projectId ||
+            verified.filePath !== captured.filePath ||
+            verified.fileId !== captured.fileId ||
+            verified.content !== captured.content ||
+            window.location.pathname.match(/^\/project\/([^/?#]+)/)?.[1] !==
+              projectId
+          ) {
+            throw new TransactionError(
+              'WRONG_FILE',
+              'Retarget identity changed during capture'
+            );
+          }
+          const proposal = await buildAnchoredInsertionProposal({
+            projectId,
+            filePath: captured.filePath,
+            ...(captured.fileId ? { fileId: captured.fileId } : {}),
+            content: captured.content,
+            offset: captured.offset,
+            insertionText: transaction.replacementText,
+            idempotencySeed: `retarget:${transaction.id}:${
+              captured.docEpoch ?? 'none'
+            }`,
+            ...(transaction.conversationId
+              ? { conversationId: transaction.conversationId }
+              : {}),
+            ...(transaction.sourceJobId
+              ? { sourceJobId: transaction.sourceJobId }
+              : {}),
+            ...(transaction.provenance
+              ? { provenance: transaction.provenance }
+              : {}),
+          });
+          return {
+            ok: true,
+            proposal: {
+              ...proposal,
+              ...(transaction.missionId
+                ? { missionId: transaction.missionId }
+                : {}),
+              supersedesTransactionId: transaction.id,
+            },
+          };
+        }
+
+        const captured = await editorAdapter.requestSelection();
+        if (
+          captured?.projectId !== projectId ||
+          !captured.filePath ||
+          typeof captured.content !== 'string' ||
+          typeof captured.selection !== 'string' ||
+          !captured.selection ||
+          !Number.isInteger(captured.from) ||
+          !Number.isInteger(captured.to) ||
+          captured.to <= captured.from ||
+          captured.content.slice(captured.from, captured.to) !==
+            captured.selection
+        ) {
+          throw new TransactionError(
+            'INVALID_REQUEST',
+            'Replacement retarget requires one exact current selection'
+          );
+        }
+        const verified = await editorAdapter.requestTargetFile({
+          projectId,
+          filePath: captured.filePath,
+          ...(captured.fileId ? { fileId: captured.fileId } : {}),
+        });
+        if (
+          !verified?.ok ||
+          verified.projectId !== captured.projectId ||
+          verified.filePath !== captured.filePath ||
+          verified.fileId !== captured.fileId ||
+          verified.content !== captured.content ||
+          window.location.pathname.match(/^\/project\/([^/?#]+)/)?.[1] !==
+            projectId
+        ) {
+          throw new TransactionError(
+            'WRONG_FILE',
+            'Retarget identity changed during capture'
+          );
+        }
+        const proposal = await buildDurableReplacementProposal({
+          projectId,
+          filePath: captured.filePath,
+          ...(captured.fileId ? { fileId: captured.fileId } : {}),
+          content: captured.content,
+          from: captured.from,
+          to: captured.to,
+          expectedText: captured.selection,
+          replacementText: transaction.replacementText,
+          idempotencySeed: `retarget:${transaction.id}:${
+            captured.docEpoch ?? 'none'
+          }`,
+          ...(transaction.conversationId
+            ? { conversationId: transaction.conversationId }
+            : {}),
+          ...(transaction.sourceJobId
+            ? { sourceJobId: transaction.sourceJobId }
+            : {}),
+          ...(transaction.provenance
+            ? { provenance: transaction.provenance }
+            : {}),
+        });
+        return {
+          ok: true,
+          proposal: {
+            ...proposal,
+            ...(transaction.missionId
+              ? { missionId: transaction.missionId }
+              : {}),
+            supersedesTransactionId: transaction.id,
+          },
+        };
+      })().then(sendResponse, (error) =>
+        sendResponse({
+          ok: false,
+          error: {
+            code:
+              error instanceof TransactionError
+                ? error.code
+                : sanitizeFailureCode(undefined),
+          },
+        })
+      );
       return true;
     }
     return undefined;

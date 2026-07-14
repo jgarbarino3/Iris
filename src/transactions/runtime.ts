@@ -12,12 +12,14 @@ import {
   type DurableFileBatchV1,
   type EditOperationV1,
   type EditTransactionV1,
+  type ProposeEditTransactionV1,
   type TransactionRuntimeContext,
   type TransactionRuntimeRequestV1,
   type TransactionRuntimeResponseV1,
 } from './contracts';
 import type { TransactionService } from './transactionService';
 import type { FileAtomicBatchPlanV1, FileBatchSnapshotV1 } from './fileBatch';
+import type { ConflictFileSnapshotV1 } from './conflictResolution';
 
 export type TransactionRuntimeDependencies = {
   service: TransactionService;
@@ -41,6 +43,14 @@ export type TransactionRuntimeDependencies = {
     transaction: EditTransactionV1,
     context: TransactionRuntimeContext
   ) => Promise<string>;
+  readConflictSnapshot?: (
+    transaction: EditTransactionV1,
+    context: TransactionRuntimeContext
+  ) => Promise<ConflictFileSnapshotV1>;
+  captureRetarget?: (
+    transaction: EditTransactionV1,
+    context: TransactionRuntimeContext
+  ) => Promise<ProposeEditTransactionV1>;
 };
 
 function objectPayload(payload: unknown): Record<string, unknown> {
@@ -121,6 +131,15 @@ export function createTransactionRuntimeHandler(
           const scoped = parseProjectScopedIdPayload(payload);
           enforceRuntimeProjectScope(scoped.projectId, context);
           result = await dependencies.service.get(scoped.projectId, scoped.id);
+          break;
+        }
+        case 'getSuccessor': {
+          const scoped = parseProjectScopedIdPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.getSuccessor(
+            scoped.projectId,
+            scoped.id
+          );
           break;
         }
         case 'list': {
@@ -230,12 +249,41 @@ export function createTransactionRuntimeHandler(
               error instanceof TransactionError
                 ? error
                 : new TransactionError('APPLY_FAILED', 'Edit preflight failed');
-            await dependencies.service.failPreflight(
-              scoped.projectId,
-              scoped.id,
-              scoped.expectedRevision,
-              transactionError.code
-            );
+            if (
+              [
+                'WRONG_PROJECT',
+                'WRONG_FILE',
+                'STALE_HASH',
+                'EXPECTED_TEXT_MISMATCH',
+                'AMBIGUOUS_ANCHOR',
+              ].includes(transactionError.code)
+            ) {
+              let snapshot: ConflictFileSnapshotV1 | null = null;
+              try {
+                snapshot = dependencies.readConflictSnapshot
+                  ? await dependencies.readConflictSnapshot(
+                      transaction,
+                      context
+                    )
+                  : null;
+              } catch {
+                snapshot = null;
+              }
+              await dependencies.service.inspectConflict(
+                scoped.projectId,
+                scoped.id,
+                scoped.expectedRevision,
+                snapshot,
+                transactionError.code
+              );
+            } else {
+              await dependencies.service.failPreflight(
+                scoped.projectId,
+                scoped.id,
+                scoped.expectedRevision,
+                transactionError.code
+              );
+            }
             throw transactionError;
           }
           result = await dependencies.service.preflight(
@@ -243,6 +291,116 @@ export function createTransactionRuntimeHandler(
             scoped.id,
             scoped.expectedRevision,
             preflight.expectedPostApplySha256
+          );
+          break;
+        }
+        case 'inspectConflict': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          const transaction = await dependencies.service.get(
+            scoped.projectId,
+            scoped.id
+          );
+          if (!transaction) {
+            throw new TransactionError(
+              'INVALID_REQUEST',
+              `Unknown transaction ${scoped.id}`
+            );
+          }
+          let snapshot: ConflictFileSnapshotV1 | null = null;
+          try {
+            snapshot = dependencies.readConflictSnapshot
+              ? await dependencies.readConflictSnapshot(transaction, context)
+              : null;
+          } catch {
+            snapshot = null;
+          }
+          result = await dependencies.service.inspectConflict(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            snapshot,
+            transaction.failure?.code ?? 'STALE_HASH'
+          );
+          break;
+        }
+        case 'strictRebase': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          const transaction = await dependencies.service.get(
+            scoped.projectId,
+            scoped.id
+          );
+          if (!transaction) {
+            throw new TransactionError(
+              'INVALID_REQUEST',
+              `Unknown transaction ${scoped.id}`
+            );
+          }
+          if (!dependencies.readConflictSnapshot) {
+            throw new TransactionError(
+              'EDITOR_UNAVAILABLE',
+              'Conflict snapshot reader unavailable'
+            );
+          }
+          const snapshot = await dependencies.readConflictSnapshot(
+            transaction,
+            context
+          );
+          result = await dependencies.service.strictRebase(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            snapshot
+          );
+          break;
+        }
+        case 'retarget': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          const transaction = await dependencies.service.get(
+            scoped.projectId,
+            scoped.id
+          );
+          if (!transaction) {
+            throw new TransactionError(
+              'INVALID_REQUEST',
+              `Unknown transaction ${scoped.id}`
+            );
+          }
+          if (!dependencies.captureRetarget) {
+            throw new TransactionError(
+              'EDITOR_UNAVAILABLE',
+              'Retarget capture unavailable'
+            );
+          }
+          const proposal = await dependencies.captureRetarget(
+            transaction,
+            context
+          );
+          result = await dependencies.service.retarget(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            proposal
+          );
+          break;
+        }
+        case 'supersedeProposal': {
+          const scoped = parseRevisionScopedPayload(payload);
+          const replacementText = payload.replacementText;
+          if (typeof replacementText !== 'string') {
+            throw new TransactionError(
+              'INVALID_REQUEST',
+              'Missing replacementText'
+            );
+          }
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.supersedeProposal(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            replacementText
           );
           break;
         }

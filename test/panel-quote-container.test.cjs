@@ -29,7 +29,7 @@ test('Message rendering uses the quote-aware renderer and stable ids', () => {
 
   assert.match(
     contents,
-    /const renderMessageBubble = \(message: Message\) =>[\s\S]*renderMessageContent\(message,\s*latestPatchText\)/s
+    /const renderMessageBubble = \(message: Message\) =>[\s\S]*renderMessageContent\(\s*message,\s*latestPatchText\s*\)/s
   );
   assert.match(
     contents,

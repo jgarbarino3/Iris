@@ -13,6 +13,7 @@ export type FileBatchSnapshotV1 = {
   filePath: string;
   fileId?: string;
   content: string;
+  docEpoch?: number;
 };
 
 export type EditorDispatchChangeV1 = {

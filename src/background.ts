@@ -1,11 +1,15 @@
 'use strict';
 
-import type { NativeHostRequest, NativeHostResponse } from './iso/messaging/nativeProtocol';
+import type {
+  NativeHostRequest,
+  NativeHostResponse,
+} from './iso/messaging/nativeProtocol';
 import type {
   ApplyEditBatchReceiptV1,
   ApplyEditBatchRequestV1,
   DurableFileBatchV1,
   EditTransactionV1,
+  ProposeEditTransactionV1,
   TransactionRuntimeContext,
   TransactionRuntimeRequestV1,
   TransactionRuntimeResponseV1,
@@ -29,9 +33,14 @@ const pending = new Map<string, (response: NativeHostResponse) => void>();
 const streamPorts = new Map<string, chrome.runtime.Port>();
 
 const transactionRepository = new IndexedDbTransactionRepository();
-const transactionService = new TransactionService({ repository: transactionRepository });
+const transactionService = new TransactionService({
+  repository: transactionRepository,
+});
 
-async function sendToTab<T>(tabId: number | null, message: unknown): Promise<T> {
+async function sendToTab<T>(
+  tabId: number | null,
+  message: unknown
+): Promise<T> {
   if (!Number.isInteger(tabId)) {
     throw new TransactionError('EDITOR_UNAVAILABLE', 'Editor tab unavailable');
   }
@@ -58,7 +67,9 @@ function projectIdFromTabUrl(url?: string): string | null {
 }
 
 function isExtensionHarnessUrl(url?: string): boolean {
-  return Boolean(url?.startsWith(chrome.runtime.getURL('browser-test-harness.html')));
+  return Boolean(
+    url?.startsWith(chrome.runtime.getURL('browser-test-harness.html'))
+  );
 }
 
 function rejectedRuntimeResponse(
@@ -146,6 +157,7 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
       filePath?: string;
       fileId?: string;
       content?: string;
+      docEpoch?: number;
       error?: { code?: unknown };
     }>(context.tabId, {
       type: 'iris:transaction:read-file',
@@ -171,6 +183,9 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
       filePath: response.filePath,
       ...(response.fileId ? { fileId: response.fileId } : {}),
       content: response.content,
+      ...(Number.isInteger(response.docEpoch)
+        ? { docEpoch: response.docEpoch }
+        : {}),
     };
   },
   readFileSha256: async (transaction: EditTransactionV1, context) => {
@@ -179,7 +194,11 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
         type: 'iris:transaction:apply-batch',
         request: transaction.pendingApply.request,
       });
-      if (replay?.success && replay.afterSha256 && isSha256(replay.afterSha256)) {
+      if (
+        replay?.success &&
+        replay.afterSha256 &&
+        isSha256(replay.afterSha256)
+      ) {
         return replay.afterSha256;
       }
     }
@@ -188,9 +207,72 @@ const handleTransactionRequest = createTransactionRuntimeHandler({
       transaction,
     });
     if (!response?.sha256 || !isSha256(response.sha256)) {
-      throw new TransactionError('EDITOR_UNAVAILABLE', 'Editor hash unavailable');
+      throw new TransactionError(
+        'EDITOR_UNAVAILABLE',
+        'Editor hash unavailable'
+      );
     }
     return response.sha256.toLowerCase();
+  },
+  readConflictSnapshot: async (transaction, context) => {
+    const response = await sendToTab<{
+      ok?: boolean;
+      projectId?: string;
+      filePath?: string;
+      fileId?: string;
+      content?: string;
+      docEpoch?: number;
+      error?: { code?: unknown };
+    }>(context.tabId, {
+      type: 'iris:transaction:read-file',
+      target: {
+        projectId: transaction.projectId,
+        filePath: transaction.target.filePath,
+        ...(transaction.target.fileId
+          ? { fileId: transaction.target.fileId }
+          : {}),
+      },
+    });
+    if (
+      response?.ok !== true ||
+      response.projectId !== transaction.projectId ||
+      typeof response.filePath !== 'string' ||
+      typeof response.content !== 'string'
+    ) {
+      throw new TransactionError(
+        sanitizeFailureCode(response?.error?.code),
+        'Conflict snapshot unavailable'
+      );
+    }
+    return {
+      projectId: response.projectId,
+      filePath: response.filePath,
+      ...(response.fileId ? { fileId: response.fileId } : {}),
+      content: response.content,
+      ...(Number.isInteger(response.docEpoch)
+        ? { docEpoch: response.docEpoch }
+        : {}),
+    };
+  },
+  captureRetarget: async (
+    transaction: EditTransactionV1,
+    context
+  ): Promise<ProposeEditTransactionV1> => {
+    const response = await sendToTab<{
+      ok?: boolean;
+      proposal?: ProposeEditTransactionV1;
+      error?: { code?: unknown };
+    }>(context.tabId, {
+      type: 'iris:transaction:capture-retarget',
+      transaction,
+    });
+    if (response?.ok !== true || !response.proposal) {
+      throw new TransactionError(
+        sanitizeFailureCode(response?.error?.code),
+        'Retarget capture failed'
+      );
+    }
+    return response.proposal;
   },
 });
 
@@ -224,7 +306,8 @@ function ensureNativePort(): chrome.runtime.Port | null {
     }
   });
   nativePort.onDisconnect.addListener(() => {
-    const errorMessage = chrome.runtime.lastError?.message || 'Native host disconnected';
+    const errorMessage =
+      chrome.runtime.lastError?.message || 'Native host disconnected';
 
     // Drain all pending requests with error
     for (const [id, handler] of pending.entries()) {
@@ -337,7 +420,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const request = message.request as NativeHostRequest;
     const port = ensureNativePort();
     if (!port) {
-      sendResponse({ id: request.id, kind: 'error', message: 'native_unavailable' });
+      sendResponse({
+        id: request.id,
+        kind: 'error',
+        message: 'native_unavailable',
+      });
       return undefined;
     }
     pending.set(request.id, sendResponse);
@@ -345,7 +432,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       port.postMessage(request);
     } catch {
       pending.delete(request.id);
-      sendResponse({ id: request.id, kind: 'error', message: 'native_unavailable' });
+      sendResponse({
+        id: request.id,
+        kind: 'error',
+        message: 'native_unavailable',
+      });
       return undefined;
     }
     return true;
@@ -364,7 +455,11 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!native) {
     port.onMessage.addListener((message: NativeHostRequest) => {
       try {
-        port.postMessage({ id: message.id, kind: 'error', message: 'native_unavailable' });
+        port.postMessage({
+          id: message.id,
+          kind: 'error',
+          message: 'native_unavailable',
+        });
       } catch {
         // ignore
       }
@@ -383,7 +478,11 @@ chrome.runtime.onConnect.addListener((port) => {
     } catch {
       streamPorts.delete(message.id);
       try {
-        port.postMessage({ id: message.id, kind: 'error', message: 'Native host disconnected' });
+        port.postMessage({
+          id: message.id,
+          kind: 'error',
+          message: 'Native host disconnected',
+        });
       } catch {
         // ignore
       }

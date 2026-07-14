@@ -60,6 +60,33 @@ export type TransactionFailureV1 = {
   at: number;
 };
 
+export type ConflictUnavailableReasonV1 =
+  | 'NO_MATCH'
+  | 'AMBIGUOUS'
+  | 'TOO_MANY_CANDIDATES'
+  | 'WRONG_PROJECT'
+  | 'WRONG_FILE'
+  | 'WRONG_FILE_ID'
+  | 'STALE_SNAPSHOT';
+
+export type ConflictPreviewV1 = {
+  schemaVersion: 1;
+  projectId: string;
+  target: EditTargetV1;
+  expectedText: string;
+  currentObservedText: string;
+  proposedText: string;
+  baseContentSha256: string;
+  currentContentSha256?: string;
+  conflictCode: TransactionErrorCode;
+  candidateCount: number;
+  candidateLimitExceeded: boolean;
+  strictRebaseAvailable: boolean;
+  unavailableReason?: ConflictUnavailableReasonV1;
+  capturedAt: number;
+  docEpoch?: number;
+};
+
 export type EditTargetV1 = {
   filePath: string;
   fileId?: string;
@@ -147,6 +174,7 @@ export type EditTransactionV1 = {
   rejectedAt?: number;
   failedAt?: number;
   failure?: TransactionFailureV1;
+  conflict?: ConflictPreviewV1;
   receipt?: ApplyEditBatchReceiptV1;
   pendingApply?: {
     request: ApplyEditBatchRequestV1;
@@ -272,6 +300,10 @@ export type TransactionJournalEventV1 = {
   toState: EditTransactionState;
   timestamp: number;
   failure?: TransactionFailureV1;
+  relationship?: {
+    kind: 'supersedes' | 'superseded-by';
+    transactionId: string;
+  };
 };
 
 export type ProposeEditTransactionV1 = {
@@ -312,6 +344,11 @@ export type TransactionRuntimeActionV1 =
   | 'apply'
   | 'reject'
   | 'retry'
+  | 'inspectConflict'
+  | 'strictRebase'
+  | 'retarget'
+  | 'supersedeProposal'
+  | 'getSuccessor'
   | 'reconcile'
   | 'cancel';
 
@@ -356,6 +393,18 @@ export function assertProposal(input: ProposeEditTransactionV1): void {
     throw new TransactionError(
       'INVALID_REQUEST',
       'Missing transaction identity'
+    );
+  }
+  const normalizedPath = input.target.filePath.trim().replace(/\\/g, '/');
+  if (
+    normalizedPath.startsWith('/') ||
+    /^[A-Za-z]:\//.test(normalizedPath) ||
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedPath) ||
+    normalizedPath.split('/').includes('..')
+  ) {
+    throw new TransactionError(
+      'INVALID_REQUEST',
+      'Target file path must be project-relative'
     );
   }
   if (

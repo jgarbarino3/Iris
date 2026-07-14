@@ -46,6 +46,11 @@ export type AtomicOperationUpdateV1 = {
   }>;
 };
 
+export type AtomicSupersedeResultV1 = {
+  original: EditTransactionV1;
+  successor: EditTransactionV1;
+};
+
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -309,6 +314,184 @@ export class IndexedDbTransactionRepository {
         proposalFingerprint
       );
       if (recovered) return recovered;
+      throw error;
+    }
+  }
+
+  async supersedeWithSuccessor(
+    originalId: string,
+    expectedOriginalRevision: number,
+    successor: EditTransactionV1,
+    successorEvent: TransactionJournalEventV1,
+    originalEvent: TransactionJournalEventV1,
+    proposalFingerprint: string
+  ): Promise<AtomicSupersedeResultV1> {
+    const compositeKey = composeIdempotencyKey(
+      successor.projectId,
+      successor.idempotencyKey
+    );
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [TRANSACTIONS_STORE, JOURNAL_STORE, IDEMPOTENCY_STORE],
+      'readwrite'
+    );
+    const transactions = idbTransaction.objectStore(TRANSACTIONS_STORE);
+    const journal = idbTransaction.objectStore(JOURNAL_STORE);
+    const idempotency = idbTransaction.objectStore(IDEMPOTENCY_STORE);
+    try {
+      const original = await requestResult(
+        transactions.get(originalId) as IDBRequest<
+          EditTransactionV1 | undefined
+        >
+      );
+      if (!original) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          `Unknown transaction ${originalId}`
+        );
+      }
+      if (original.projectId !== successor.projectId) {
+        idbTransaction.abort();
+        throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
+      }
+      if (original.supersededByTransactionId) {
+        const authoritative = await requestResult(
+          transactions.get(original.supersededByTransactionId) as IDBRequest<
+            EditTransactionV1 | undefined
+          >
+        );
+        await transactionDone(idbTransaction);
+        if (
+          !authoritative ||
+          authoritative.supersedesTransactionId !== original.id
+        ) {
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Supersede relationship is incomplete'
+          );
+        }
+        return { original, successor: authoritative };
+      }
+      if (original.revision !== expectedOriginalRevision) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'STALE_REVISION',
+          `Expected revision ${expectedOriginalRevision}, found ${original.revision}`
+        );
+      }
+      if (!['proposed', 'conflicted', 'failed'].includes(original.state)) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          'Transaction cannot be superseded from its current state'
+        );
+      }
+
+      const existingIdempotency = await requestResult(
+        idempotency.get(compositeKey) as IDBRequest<
+          IdempotencyRecord | undefined
+        >
+      );
+      if (existingIdempotency) {
+        if (existingIdempotency.proposalFingerprint !== proposalFingerprint) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'INVALID_REQUEST',
+            'Idempotency key reused with different proposal content'
+          );
+        }
+        const existingSuccessor = await requestResult(
+          transactions.get(existingIdempotency.transactionId) as IDBRequest<
+            EditTransactionV1 | undefined
+          >
+        );
+        if (
+          !existingSuccessor ||
+          existingSuccessor.supersedesTransactionId !== original.id
+        ) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Successor idempotency relationship is incomplete'
+          );
+        }
+        const nextOriginal: EditTransactionV1 = {
+          ...original,
+          state: 'superseded',
+          revision: original.revision + 1,
+          updatedAt: originalEvent.timestamp,
+          supersededByTransactionId: existingSuccessor.id,
+          pendingApply: undefined,
+          expectedPostApplySha256: undefined,
+        };
+        transactions.put(nextOriginal);
+        journal.add({
+          ...originalEvent,
+          revision: nextOriginal.revision,
+          fromState: original.state,
+          toState: 'superseded',
+          relationship: {
+            kind: 'superseded-by',
+            transactionId: existingSuccessor.id,
+          },
+        });
+        await transactionDone(idbTransaction);
+        return { original: nextOriginal, successor: existingSuccessor };
+      }
+
+      const nextOriginal: EditTransactionV1 = {
+        ...original,
+        state: 'superseded',
+        revision: original.revision + 1,
+        updatedAt: originalEvent.timestamp,
+        supersededByTransactionId: successor.id,
+        pendingApply: undefined,
+        expectedPostApplySha256: undefined,
+      };
+      transactions.add(successor);
+      journal.add(successorEvent);
+      idempotency.add({
+        key: compositeKey,
+        projectId: successor.projectId,
+        idempotencyKey: successor.idempotencyKey,
+        proposalFingerprint,
+        transactionId: successor.id,
+      } as IdempotencyRecord);
+      transactions.put(nextOriginal);
+      journal.add({
+        ...originalEvent,
+        revision: nextOriginal.revision,
+        fromState: original.state,
+        toState: 'superseded',
+        relationship: {
+          kind: 'superseded-by',
+          transactionId: successor.id,
+        },
+      });
+      await transactionDone(idbTransaction);
+      return { original: nextOriginal, successor };
+    } catch (error) {
+      try {
+        await transactionDone(idbTransaction);
+      } catch {
+        // Constraint races are resolved by reading the authoritative original.
+      }
+      if (error instanceof TransactionError) throw error;
+      const recoveredOriginal = await this.get(originalId);
+      if (recoveredOriginal?.supersededByTransactionId) {
+        const recoveredSuccessor = await this.get(
+          recoveredOriginal.supersededByTransactionId
+        );
+        if (
+          recoveredSuccessor?.supersedesTransactionId === recoveredOriginal.id
+        ) {
+          return {
+            original: recoveredOriginal,
+            successor: recoveredSuccessor,
+          };
+        }
+      }
       throw error;
     }
   }

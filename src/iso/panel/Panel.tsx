@@ -54,6 +54,7 @@ import type {
   TransactionRuntimeActionV1,
   TransactionRuntimeResponseV1,
 } from '../../transactions/contracts';
+import type { SupersedeTransactionResultV1 } from '../../transactions/transactionService';
 import type {
   NativeHostRequest,
   NativeHostResponse,
@@ -281,14 +282,54 @@ function getReplaceRangeIdentityKey(
 }
 
 function getPatchFeedbackAnchorKey(
-  review: StoredPatchReview & {
-    kind: 'replaceSelection' | 'replaceRangeInFile';
-  }
+  review: StoredPatchReview
 ) {
   if (review.kind === 'replaceSelection') {
     return `replaceSelection:${review.fileName ?? ''}:${review.from}:${review.to}:${review.selection}`;
   }
-  return `replaceRangeInFile:${review.filePath}:${review.expectedOldText}:${typeof review.from === 'number' ? review.from : ''}:${typeof review.to === 'number' ? review.to : ''}`;
+  if (review.kind === 'replaceRangeInFile') {
+    return `replaceRangeInFile:${review.filePath}:${review.expectedOldText}:${typeof review.from === 'number' ? review.from : ''}:${typeof review.to === 'number' ? review.to : ''}`;
+  }
+  return `insertAtCursor:${review.transactionId ?? review.text}`;
+}
+
+function projectSuccessorPatchReview(
+  current: StoredPatchReview,
+  successor: EditTransactionV1
+): StoredPatchReview {
+  const common = {
+    transactionId: successor.id,
+    transactionRevision: successor.revision,
+    projectId: successor.projectId,
+    successorTransactionId: successor.id,
+    conflictPreview: undefined,
+    transactionError: undefined,
+    transactionOutcome: undefined,
+    operationId: undefined,
+    status: 'pending' as const,
+    text: successor.replacementText,
+  };
+  if (current.kind === 'insertAtCursor') {
+    return { ...current, ...common };
+  }
+  if (current.kind === 'replaceSelection') {
+    return {
+      ...current,
+      ...common,
+      selection: successor.expectedText,
+      from: successor.target.from,
+      to: successor.target.to,
+      fileName: successor.target.filePath,
+    };
+  }
+  return {
+    ...current,
+    ...common,
+    filePath: successor.target.filePath,
+    expectedOldText: successor.expectedText,
+    from: successor.target.from,
+    to: successor.target.to,
+  };
 }
 
 function upsertPatchReviewMessage<T extends { patchReview?: StoredPatchReview }>(
@@ -330,6 +371,7 @@ function computeFileSummary(messages: Message[]): FileSummaryEntry[] {
     if (!patchReview) continue;
     const status = (patchReview as any).status ?? 'pending';
     if (status !== 'pending') continue;
+    if (patchReview.conflictPreview) continue;
 
     let filePath: string;
     let oldLines: number;
@@ -409,8 +451,10 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_FILE_BYTES = 100 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS: Record<string, string> = {
   '.pdf': 'application/pdf',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx':
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
@@ -532,10 +576,17 @@ function formatToolName(toolName: string): string {
 }
 
 /** Extract short context string for the tool header " · context" display. */
-function formatToolContext(toolName: string, input?: string, description?: string): string | null {
+function formatToolContext(
+  toolName: string,
+  input?: string,
+  description?: string
+): string | null {
   if (!input && !description) return null;
   // For file tools, show basename
-  if ((toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') && input) {
+  if (
+    (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') &&
+    input
+  ) {
     const parts = input.split('/');
     return parts[parts.length - 1] || input;
   }
@@ -549,7 +600,15 @@ function formatToolContext(toolName: string, input?: string, description?: strin
 }
 
 /** Elapsed time component that ticks every second while tool is running. */
-const ElapsedTimer = ({ startedAt, completedAt, className }: { startedAt?: number; completedAt?: number; className?: string }) => {
+const ElapsedTimer = ({
+  startedAt,
+  completedAt,
+  className,
+}: {
+  startedAt?: number;
+  completedAt?: number;
+  className?: string;
+}) => {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (completedAt || !startedAt) return;
@@ -735,8 +794,12 @@ type PatchFeedbackTarget = {
   conversationId: string;
   messageId: string;
   messageIndex: number;
-  kind: 'replaceSelection' | 'replaceRangeInFile';
+  kind: 'replaceSelection' | 'replaceRangeInFile' | 'insertAtCursor';
   anchorKey: string;
+  supersedeOriginal?: {
+    projectId: string;
+    transactionId: string;
+  };
 };
 
 type QueuedMessage = {
@@ -1090,6 +1153,7 @@ const Panel = () => {
       byId.set(message.id, message);
       const patchReview = message.patchReview;
       if (!patchReview || patchReview.kind !== 'replaceRangeInFile') continue;
+      if (patchReview.conflictPreview) continue;
       const status = (patchReview as any).status ?? 'pending';
       const fileKey = patchReview.filePath.toLowerCase();
       const existing = groupMap.get(fileKey);
@@ -1382,7 +1446,7 @@ const Panel = () => {
     force?: boolean;
   } | null>(null);
   const lineFromBackfillAttemptedRef = useRef<Set<string>>(new Set());
-  const insertionProjectionSyncRef = useRef<Set<string>>(new Set());
+  const durableProjectionSyncRef = useRef<Set<string>>(new Set());
 
   const providerDisplay =
     PROVIDER_DISPLAY[chatProvider] ?? PROVIDER_DISPLAY.claude;
@@ -1620,7 +1684,10 @@ const Panel = () => {
 
     // Detect host restart via startedAt — reset trust mode sync so preferences re-sync.
     // This catches brief restarts (<15s) where hostConnected never goes false.
-    if (healthData?.startedAt && healthData.startedAt !== lastHostStartedAtRef.current) {
+    if (
+      healthData?.startedAt &&
+      healthData.startedAt !== lastHostStartedAtRef.current
+    ) {
       if (lastHostStartedAtRef.current !== null) {
         // Host identity changed — force re-sync
         lastSyncedTrustModeRef.current = null;
@@ -1654,7 +1721,9 @@ const Panel = () => {
           const persistedTrustMode = options.skillTrustMode ?? 'verified';
           if (persistedTrustMode !== lastSyncedTrustModeRef.current) {
             try {
-              await updatePiRuntimePreferences(options, { skillTrustMode: persistedTrustMode });
+              await updatePiRuntimePreferences(options, {
+                skillTrustMode: persistedTrustMode,
+              });
               lastSyncedTrustModeRef.current = persistedTrustMode;
             } catch {
               // Leave as-is — next health check retries
@@ -1733,8 +1802,8 @@ const Panel = () => {
       } else if (response.kind === 'response') {
         const detail =
           typeof response.body === 'object' &&
-            response.body &&
-            'message' in response.body
+          response.body &&
+          'message' in response.body
             ? String((response.body as { message: unknown }).message)
             : undefined;
         setNativeStatusError(
@@ -1967,19 +2036,19 @@ const Panel = () => {
           // Determine model selection
           const resolvedModel = metadata
             ? metadata.currentModel ??
-            models.find((model: RuntimeModel) => model.isDefault)?.value ??
-            models[0]?.value ??
-            null
+              models.find((model: RuntimeModel) => model.isDefault)?.value ??
+              models[0]?.value ??
+              null
             : models.find((model: RuntimeModel) => model.isDefault)?.value ??
-            models[0]?.value ??
-            null;
+              models[0]?.value ??
+              null;
           setCurrentModel(resolvedModel);
 
           const selectedModel =
             (resolvedModel
               ? models.find(
-                (model: RuntimeModel) => model.value === resolvedModel
-              )
+                  (model: RuntimeModel) => model.value === resolvedModel
+                )
               : undefined) ??
             models.find((model: RuntimeModel) => model.isDefault) ??
             models[0] ??
@@ -2076,22 +2145,22 @@ const Panel = () => {
         setCurrentModel(
           metadata
             ? metadata.currentModel ??
-            options.claudeModel ??
-            DEFAULT_MODEL_VALUE
+                options.claudeModel ??
+                DEFAULT_MODEL_VALUE
             : options.claudeModel ?? DEFAULT_MODEL_VALUE
         );
         setCurrentThinkingMode(
           metadata
             ? metadata.currentThinkingMode ??
-            options.claudeThinkingMode ??
-            'off'
+                options.claudeThinkingMode ??
+                'off'
             : options.claudeThinkingMode ?? 'off'
         );
         setCurrentThinkingTokens(
           metadata
             ? metadata.maxThinkingTokens ??
-            options.claudeMaxThinkingTokens ??
-            null
+                options.claudeMaxThinkingTokens ??
+                null
             : options.claudeMaxThinkingTokens ?? null
         );
         setRuntimeAutonomous(options.claudeYoloMode ?? true);
@@ -2112,7 +2181,9 @@ const Panel = () => {
           setRuntimeAutonomous(true);
           return;
         }
-        setRuntimeModels(chatProvider === 'claude' ? CLAUDE_FALLBACK_MODELS : []);
+        setRuntimeModels(
+          chatProvider === 'claude' ? CLAUDE_FALLBACK_MODELS : []
+        );
         if (chatProvider === 'codex') {
           setThinkingModes(
             FALLBACK_THINKING_MODES.map((mode) => ({
@@ -2318,7 +2389,9 @@ const Panel = () => {
   >(() => new Set());
 
   // Track expanded tool items for detail view
-  const [expandedToolItems, setExpandedToolItems] = useState<Set<string>>(() => new Set());
+  const [expandedToolItems, setExpandedToolItems] = useState<Set<string>>(
+    () => new Set()
+  );
 
   const toggleThinkingItemExpanded = (key: string) => {
     setExpandedThinkingItems((prev) => {
@@ -2354,7 +2427,9 @@ const Panel = () => {
    * Returns a new array where adjacent thinking items are collapsed into
    * a single { type: 'thinking-group', items: [...] } entry.
    */
-  type CoTGroupedItem = CoTItem | { type: 'thinking-group'; items: CoTThinkingItem[] };
+  type CoTGroupedItem =
+    | CoTItem
+    | { type: 'thinking-group'; items: CoTThinkingItem[] };
   const groupCoTItems = (items: CoTItem[]): CoTGroupedItem[] => {
     const result: CoTGroupedItem[] = [];
     let thinkingBuffer: CoTThinkingItem[] = [];
@@ -2400,7 +2475,10 @@ const Panel = () => {
     if (!cot || cot.length === 0) return null;
     // Trim trailing text items — they duplicate the message content rendered below.
     let trimmedCot = cot;
-    while (trimmedCot.length > 0 && trimmedCot[trimmedCot.length - 1].type === 'text') {
+    while (
+      trimmedCot.length > 0 &&
+      trimmedCot[trimmedCot.length - 1].type === 'text'
+    ) {
       trimmedCot = trimmedCot.slice(0, -1);
     }
     if (trimmedCot.length === 0) return null;
@@ -2439,13 +2517,9 @@ const Panel = () => {
         >
           <span class="ageaf-cot-thinking-icon">🧠</span>
           {isThinkingExpanded ? (
-            <span class="ageaf-cot-thinking-content">
-              {item.content}
-            </span>
+            <span class="ageaf-cot-thinking-content">{item.content}</span>
           ) : (
-            <span class="ageaf-cot-thinking-preview">
-              {preview}
-            </span>
+            <span class="ageaf-cot-thinking-preview">{preview}</span>
           )}
           <span class="ageaf-cot-thinking-toggle">
             {isThinkingExpanded ? '▼' : '▶'}
@@ -2514,9 +2588,7 @@ const Panel = () => {
                     >
                       <span class="ageaf-cot-text-icon">💬</span>
                       {isTextExpanded ? (
-                        <span class="ageaf-cot-text-content">
-                          {trimmed}
-                        </span>
+                        <span class="ageaf-cot-text-content">{trimmed}</span>
                       ) : (
                         <span class="ageaf-cot-text-preview">
                           {textPreview}
@@ -2547,7 +2619,9 @@ const Panel = () => {
                         if (!hasExpandable) return;
                         setExpandedToolItems((prev) => {
                           const next = new Set(prev);
-                          next.has(toolKey) ? next.delete(toolKey) : next.add(toolKey);
+                          next.has(toolKey)
+                            ? next.delete(toolKey)
+                            : next.add(toolKey);
                           return next;
                         });
                       }}
@@ -2562,9 +2636,16 @@ const Panel = () => {
                         <span class="ageaf-cot-tool__context">{context}</span>
                       )}
                       <span class="ageaf-cot-tool__status">
-                        <ElapsedTimer startedAt={item.startedAt} completedAt={item.completedAt} />
-                        {item.phase === 'started' && <span class="ageaf-cot-tool__spinner" />}
-                        {hasExpandable && <span class="ageaf-cot-tool__chevron">▶</span>}
+                        <ElapsedTimer
+                          startedAt={item.startedAt}
+                          completedAt={item.completedAt}
+                        />
+                        {item.phase === 'started' && (
+                          <span class="ageaf-cot-tool__spinner" />
+                        )}
+                        {hasExpandable && (
+                          <span class="ageaf-cot-tool__chevron">▶</span>
+                        )}
                       </span>
                     </div>
                     {isToolExpanded && item.input && (
@@ -2630,7 +2711,9 @@ const Panel = () => {
     next.map((message) => ({
       role: message.role,
       content: message.content,
-      ...(message.displayContent ? { displayContent: message.displayContent } : {}),
+      ...(message.displayContent
+        ? { displayContent: message.displayContent }
+        : {}),
       ...(message.statusLine ? { statusLine: message.statusLine } : {}),
       ...(message.cot ? { cot: message.cot } : {}),
       ...(message.thinking && message.thinking.length > 0
@@ -2713,7 +2796,10 @@ const Panel = () => {
 
     if (entries.length === 0) return;
 
-    const byFile = new Map<string, { filePath: string; entries: BackfillEntry[] }>();
+    const byFile = new Map<
+      string,
+      { filePath: string; entries: BackfillEntry[] }
+    >();
     for (const entry of entries) {
       const key = entry.filePath.toLowerCase();
       const group = byFile.get(key);
@@ -3010,15 +3096,16 @@ const Panel = () => {
       const review = message.patchReview;
       if (
         !review ||
-        review.kind !== 'insertAtCursor' ||
         !review.transactionId ||
         !review.projectId
       ) {
         continue;
       }
-      const syncKey = `${message.id}:${review.transactionId}`;
-      if (insertionProjectionSyncRef.current.has(syncKey)) continue;
-      insertionProjectionSyncRef.current.add(syncKey);
+      const syncKey = `${message.id}:${review.transactionId}:${
+        review.transactionRevision ?? 'unknown'
+      }`;
+      if (durableProjectionSyncRef.current.has(syncKey)) continue;
+      durableProjectionSyncRef.current.add(syncKey);
 
       void (async () => {
         let transaction = await transactionRpc<EditTransactionV1 | null>(
@@ -3029,22 +3116,44 @@ const Panel = () => {
           }
         );
         if (!transaction) {
-          throw new Error('Durable insertion transaction is missing');
+          throw new Error('Durable edit transaction is missing');
         }
         if (transaction.state === 'applying') {
           await transactionRpc<EditTransactionV1[]>('reconcile', {
             projectId: review.projectId,
           });
-          transaction = await transactionRpc<EditTransactionV1 | null>(
-            'get',
+          transaction = await transactionRpc<EditTransactionV1 | null>('get', {
+            projectId: review.projectId,
+            id: review.transactionId,
+          });
+          if (!transaction) {
+            throw new Error('Durable edit transaction is missing');
+          }
+        }
+        let supersededOriginalId: string | undefined;
+        if (
+          transaction.state === 'superseded' &&
+          transaction.supersededByTransactionId
+        ) {
+          supersededOriginalId = transaction.id;
+          const successor = await transactionRpc<EditTransactionV1 | null>(
+            'getSuccessor',
+            { projectId: transaction.projectId, id: transaction.id }
+          );
+          if (!successor) {
+            throw new Error('Durable successor transaction is missing');
+          }
+          transaction = successor;
+        }
+        if (transaction.state === 'conflicted' && !transaction.conflict) {
+          transaction = await transactionRpc<EditTransactionV1>(
+            'inspectConflict',
             {
-              projectId: review.projectId,
-              id: review.transactionId,
+              projectId: transaction.projectId,
+              id: transaction.id,
+              expectedRevision: transaction.revision,
             }
           );
-          if (!transaction) {
-            throw new Error('Durable insertion transaction is missing');
-          }
         }
 
         const durableStatus: PatchReviewStatus =
@@ -3052,28 +3161,37 @@ const Panel = () => {
           transaction.receipt?.success === true
             ? 'accepted'
             : transaction.state === 'rejected'
-              ? 'rejected'
-              : 'pending';
+            ? 'rejected'
+            : 'pending';
         const durableError =
           transaction.state === 'failed' ||
-          transaction.state === 'conflicted' ||
           (transaction.state === 'applied' &&
             transaction.receipt?.success !== true)
             ? transaction.failure?.message ??
-              'Insertion has no trustworthy persisted receipt'
+              'Edit has no trustworthy persisted receipt'
             : undefined;
 
         setMessages((previous) =>
           previous.map((entry) => {
             if (entry.id !== message.id) return entry;
             const current = entry.patchReview;
-            if (!current || current.kind !== 'insertAtCursor') return entry;
+            if (!current) return entry;
+            const projected =
+              current.transactionId !== transaction!.id
+                ? projectSuccessorPatchReview(current, transaction!)
+                : current;
             return {
               ...entry,
               patchReview: {
-                ...current,
+                ...projected,
                 status: durableStatus,
+                transactionId: transaction!.id,
+                projectId: transaction!.projectId,
                 transactionRevision: transaction!.revision,
+                conflictPreview: transaction!.conflict,
+                ...(supersededOriginalId
+                  ? { successorTransactionId: transaction!.id }
+                  : {}),
                 ...(durableError
                   ? { transactionError: durableError }
                   : { transactionError: undefined }),
@@ -3275,7 +3393,10 @@ const Panel = () => {
         data,
         size: file.size,
       };
-      updateDocumentAttachments([...documentAttachmentsRef.current, attachment]);
+      updateDocumentAttachments([
+        ...documentAttachmentsRef.current,
+        attachment,
+      ]);
     } catch {
       showAttachmentError('Failed to read document.');
     }
@@ -3378,9 +3499,9 @@ const Panel = () => {
     const getLabelText = (node: HTMLElement) =>
       sanitizeLabel(
         node.getAttribute('aria-label')?.trim() ||
-        node.getAttribute('title')?.trim() ||
-        node.textContent?.trim() ||
-        ''
+          node.getAttribute('title')?.trim() ||
+          node.textContent?.trim() ||
+          ''
       );
 
     const buildTreePath = (
@@ -3816,7 +3937,6 @@ const Panel = () => {
         }
       }
 
-
       return { skillsPrompt, strippedText, autoContextPatterns };
     } catch (err) {
       console.error(
@@ -3892,7 +4012,10 @@ const Panel = () => {
       }
       const { paths } = await openAttachmentDialog(options, {
         multiple: true,
-        extensions: [...FILE_ATTACHMENT_EXTENSIONS, ...Object.keys(DOCUMENT_EXTENSIONS)],
+        extensions: [
+          ...FILE_ATTACHMENT_EXTENSIONS,
+          ...Object.keys(DOCUMENT_EXTENSIONS),
+        ],
       });
       if (!paths.length) return;
 
@@ -3928,7 +4051,9 @@ const Panel = () => {
           const ext = getFileExtension(name);
           return {
             name,
-            mediaType: ext ? DOCUMENT_EXTENSIONS[ext] ?? 'application/octet-stream' : 'application/octet-stream',
+            mediaType: ext
+              ? DOCUMENT_EXTENSIONS[ext] ?? 'application/octet-stream'
+              : 'application/octet-stream',
             path: p,
             size: 0,
           };
@@ -4297,7 +4422,8 @@ const Panel = () => {
                   let value = lines.slice(0, maxLines).join('\n');
                   if (lines.length > maxLines) value += '\n…';
                   const maxChars = 240;
-                  if (value.length > maxChars) value = `${value.slice(0, maxChars)}…`;
+                  if (value.length > maxChars)
+                    value = `${value.slice(0, maxChars)}…`;
                   return value;
                 };
                 const rawCode =
@@ -4320,7 +4446,12 @@ const Panel = () => {
       mainContainer.appendChild(node.cloneNode(true));
     }
 
-    return { mainHtml: mainContainer.innerHTML, quotes, inlineCodeCopyTexts, interrupted };
+    return {
+      mainHtml: mainContainer.innerHTML,
+      quotes,
+      inlineCodeCopyTexts,
+      interrupted,
+    };
   };
 
   const extractCopyTextFromQuoteHtml = (html: string): string => {
@@ -4682,7 +4813,12 @@ const Panel = () => {
     const hasFiles = fileAttachmentsRef.current.length > 0;
     const hasDocs = documentAttachmentsRef.current.length > 0;
     setEditorEmpty(
-      !hasChip && !hasMention && text.length === 0 && !hasImages && !hasFiles && !hasDocs
+      !hasChip &&
+        !hasMention &&
+        text.length === 0 &&
+        !hasImages &&
+        !hasFiles &&
+        !hasDocs
     );
   };
 
@@ -4773,7 +4909,7 @@ const Panel = () => {
         ? lineFrom === lineTo
           ? lineFrom
           : `${lineFrom}-${lineTo}`
-        : lineCount > 1
+          : lineCount > 1
           ? `1-${lineCount}`
           : '1'
       }`
@@ -4988,7 +5124,8 @@ const Panel = () => {
     for (const file of list) {
       if (getImageMediaType(file)) imageFiles.push(file);
       else if (getDocumentMediaType(file)) docFiles.push(file);
-      else if (FILE_ATTACHMENT_EXTENSIONS.includes(getFileExtension(file.name))) textFiles.push(file);
+      else if (FILE_ATTACHMENT_EXTENSIONS.includes(getFileExtension(file.name)))
+        textFiles.push(file);
     }
     void (async () => {
       if (imageFiles.length > 0) {
@@ -5071,14 +5208,20 @@ const Panel = () => {
     insertChipFromText(text, activeName ?? undefined, lineFrom, lineTo);
   };
 
-  const renderMessageContent = (message: Message, latestPatchText: string | null) => {
+  const renderMessageContent = (
+    message: Message,
+    latestPatchText: string | null
+  ) => {
     if (message.patchReview) {
       const patchReview = message.patchReview;
       const status = (patchReview as any).status ?? 'pending';
       const error = patchActionErrors[message.id] ?? null;
       const busy = patchActionBusyId === message.id || bulkActionBusy;
       const canAct = status === 'pending' && !busy;
-      if (patchReview.kind === 'replaceRangeInFile') {
+      if (
+        patchReview.kind === 'replaceRangeInFile' &&
+        !patchReview.conflictPreview
+      ) {
         const groupRole = fileGroupRole.get(message.id);
         if (groupRole === 'absorbed') return null;
         if (groupRole === 'first') {
@@ -5087,21 +5230,20 @@ const Panel = () => {
           if (group) {
             const hunks: HunkEntry[] = group.ids
               .map((id) => messageById.get(id))
-              .filter(
-                (entry): entry is Message =>
-                  Boolean(
-                    entry &&
+              .filter((entry): entry is Message =>
+                Boolean(
+                  entry &&
                     entry.patchReview &&
-                    entry.patchReview.kind === 'replaceRangeInFile'
-                  )
+                    entry.patchReview.kind === 'replaceRangeInFile' &&
+                    !entry.patchReview.conflictPreview
+                )
               )
               .map((entry) => ({
                 messageId: entry.id,
                 patchReview: entry.patchReview as StoredPatchReview & {
                   kind: 'replaceRangeInFile';
                 },
-                status: ((entry.patchReview as any).status ??
-                  'pending') as any,
+                status: ((entry.patchReview as any).status ?? 'pending') as any,
                 error: patchActionErrors[entry.id] ?? null,
               }));
 
@@ -5252,13 +5394,13 @@ const Panel = () => {
     const filteredQuotes =
       latestPatchText && message.role === 'assistant'
         ? quotes.filter((quote) => {
-          const copyText = extractCopyTextFromQuoteHtml(quote.html);
-          if (!copyText) return true;
-          return (
-            normalizeForCompare(copyText) !==
-            normalizeForCompare(latestPatchText)
-          );
-        })
+            const copyText = extractCopyTextFromQuoteHtml(quote.html);
+            if (!copyText) return true;
+            return (
+              normalizeForCompare(copyText) !==
+              normalizeForCompare(latestPatchText)
+            );
+          })
         : quotes;
 
     // Check if all inline code blocks match the patch text (redundant)
@@ -5326,7 +5468,8 @@ const Panel = () => {
                   const success = await copyToClipboard(copyText);
                   if (!success) return;
                   // Swap to check icon for 3s, then revert (button is inside injected HTML)
-                  const existingTimer = latexCopyTimersRef.current.get(inlineCopyBtn);
+                  const existingTimer =
+                    latexCopyTimersRef.current.get(inlineCopyBtn);
                   if (existingTimer != null) {
                     window.clearTimeout(existingTimer);
                   }
@@ -5506,9 +5649,13 @@ const Panel = () => {
   };
 
   const formatProviderName = (provider: string): string =>
-    PROVIDER_NAME_MAP[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
+    PROVIDER_NAME_MAP[provider] ??
+    provider.charAt(0).toUpperCase() + provider.slice(1);
 
-  const getGroupedRuntimeModels = (): Array<{ provider: string; models: RuntimeModel[] }> => {
+  const getGroupedRuntimeModels = (): Array<{
+    provider: string;
+    models: RuntimeModel[];
+  }> => {
     const groups = new Map<string, RuntimeModel[]>();
     for (const model of runtimeModels) {
       const key = model.provider ?? 'unknown';
@@ -5640,7 +5787,9 @@ const Panel = () => {
         }
         if (response.currentThinkingLevel) {
           const uiLevel =
-            response.currentThinkingLevel === 'xhigh' ? 'ultra' : response.currentThinkingLevel;
+            response.currentThinkingLevel === 'xhigh'
+              ? 'ultra'
+              : response.currentThinkingLevel;
           setCurrentThinkingMode(uiLevel);
           persistUpdates.piThinkingLevel = uiLevel;
         }
@@ -5901,7 +6050,10 @@ const Panel = () => {
 
   const onSelectPiModel = async (model: RuntimeModel) => {
     setCurrentModel(model.value);
-    await applyRuntimePreferences({ model: model.value, provider: model.provider });
+    await applyRuntimePreferences({
+      model: model.value,
+      provider: model.provider,
+    });
     void refreshContextUsage();
   };
 
@@ -6450,7 +6602,7 @@ const Panel = () => {
       (streamStartConversation?.messages.length ?? 0) + 1;
     let patchFeedbackTargetActive =
       patchFeedbackTarget &&
-        patchFeedbackTarget.conversationId === sessionConversationId
+      patchFeedbackTarget.conversationId === sessionConversationId
         ? patchFeedbackTarget
         : null;
     const startedWithPatchFeedbackTarget = Boolean(patchFeedbackTargetActive);
@@ -6505,7 +6657,9 @@ const Panel = () => {
 
     startThinkingTimer(sessionConversationId);
 
-    const resolveMentionFiles = async (rawText: string): Promise<{ text: string; resolvedPaths: Set<string> }> => {
+    const resolveMentionFiles = async (
+      rawText: string
+    ): Promise<{ text: string; resolvedPaths: Set<string> }> => {
       const fileRegex = /@\[file:([^\]]+)\]/g;
       const folderRegex = /@\[folder:([^\]]+)\]/g;
       const fileRefs = Array.from(rawText.matchAll(fileRegex))
@@ -6514,7 +6668,8 @@ const Panel = () => {
       const folderRefs = Array.from(rawText.matchAll(folderRegex))
         .map((m) => String(m[1] ?? '').trim())
         .filter(Boolean);
-      if (fileRefs.length === 0 && folderRefs.length === 0) return { text: rawText, resolvedPaths: new Set<string>() };
+      if (fileRefs.length === 0 && folderRefs.length === 0)
+        return { text: rawText, resolvedPaths: new Set<string>() };
 
       const MAX_CHARS = 200_000;
       const MAX_FILES_PER_FOLDER = 5;
@@ -6885,7 +7040,8 @@ const Panel = () => {
 
     try {
       const selection = await bridge.requestSelection();
-      const { text: resolvedMessageText, resolvedPaths: mentionResolvedPaths } = await resolveMentionFiles(text);
+      const { text: resolvedMessageText, resolvedPaths: mentionResolvedPaths } =
+        await resolveMentionFiles(text);
 
       // Auto-invoke humanizer skill for writing/editing actions
       const autoInvokeHumanizer = (messageText: string): string => {
@@ -6928,9 +7084,8 @@ const Panel = () => {
       };
 
       const messageWithAutoSkills = autoInvokeHumanizer(resolvedMessageText);
-      const { skillsPrompt, strippedText, autoContextPatterns } = await processSkillDirectives(
-        messageWithAutoSkills
-      );
+      const { skillsPrompt, strippedText, autoContextPatterns } =
+        await processSkillDirectives(messageWithAutoSkills);
 
       // Auto-context: attach project files matching skill patterns
       let autoContextBlocks = '';
@@ -6938,14 +7093,21 @@ const Panel = () => {
         const MAX_AUTO_CONTEXT_FILES = 20;
         const MAX_AUTO_CONTEXT_BYTES = 500_000;
 
-        const matchAutoContext = (pattern: string, filename: string): boolean => {
+        const matchAutoContext = (
+          pattern: string,
+          filename: string
+        ): boolean => {
           if (pattern.startsWith('*.'))
-            return filename.toLowerCase().endsWith(pattern.slice(1).toLowerCase());
+            return filename
+              .toLowerCase()
+              .endsWith(pattern.slice(1).toLowerCase());
           return filename.toLowerCase() === pattern.toLowerCase();
         };
 
         // Source entries from renamed exported detector.
-        const rawEntries = detectProjectFilesFromDom().filter((e) => e.kind !== 'folder');
+        const rawEntries = detectProjectFilesFromDom().filter(
+          (e) => e.kind !== 'folder'
+        );
 
         // Canonicalize with id-first / exact-path-first dedupe.
         const rank = (e: OverleafEntry) =>
@@ -6953,7 +7115,9 @@ const Panel = () => {
 
         const canonical = new Map<string, OverleafEntry>();
         for (const entry of rawEntries) {
-          const key = entry.id ? `id:${entry.id}` : `path:${entry.path.toLowerCase()}`;
+          const key = entry.id
+            ? `id:${entry.id}`
+            : `path:${entry.path.toLowerCase()}`;
           const prev = canonical.get(key);
           if (!prev || rank(entry) > rank(prev)) canonical.set(key, entry);
         }
@@ -6981,7 +7145,9 @@ const Panel = () => {
           for (const node of nodes) {
             if (!(node instanceof HTMLElement)) continue;
             if (node.closest('#ageaf-panel-root')) continue;
-            const treeItem = node.closest('[role="treeitem"]') as HTMLElement | null;
+            const treeItem = node.closest(
+              '[role="treeitem"]'
+            ) as HTMLElement | null;
             const name = (
               treeItem?.getAttribute('aria-label') ??
               treeItem?.textContent ??
@@ -7129,61 +7295,77 @@ const Panel = () => {
       const codexRuntimeModel =
         provider === 'codex'
           ? (codexModelCandidate
-            ? runtimeModels.find(
-              (entry) => entry.value === codexModelCandidate
-            )
-            : null) ??
-          runtimeModels.find((entry) => entry.isDefault) ??
-          runtimeModels.find(
-            (entry) => entry.supportedReasoningEfforts !== undefined
-          ) ??
-          runtimeModels[0] ??
-          null
+              ? runtimeModels.find(
+                  (entry) => entry.value === codexModelCandidate
+                )
+              : null) ??
+            runtimeModels.find((entry) => entry.isDefault) ??
+            runtimeModels.find(
+              (entry) => entry.supportedReasoningEfforts !== undefined
+            ) ??
+            runtimeModels[0] ??
+            null
           : null;
       const codexModel =
         provider === 'codex' &&
-          codexRuntimeModel?.supportedReasoningEfforts !== undefined
+        codexRuntimeModel?.supportedReasoningEfforts !== undefined
           ? codexRuntimeModel.value
           : null;
       const codexEffort =
         provider === 'codex' && codexModel
           ? getCodexEffortForThinkingMode(
-            currentThinkingMode as ThinkingMode['id'],
-            codexRuntimeModel
-          ) ??
-          codexRuntimeModel?.defaultReasoningEffort ??
-          null
+              currentThinkingMode as ThinkingMode['id'],
+              codexRuntimeModel
+            ) ??
+            codexRuntimeModel?.defaultReasoningEffort ??
+            null
           : null;
       // Fetch all text-based project files for context-aware search tools
       const projectFilesForContext = await (async () => {
         const TEXT_EXTS = new Set(['.tex', '.bib', '.sty', '.cls', '.bst']);
         const MAX_PROJECT_FILES = 50;
         const MAX_TOTAL_BYTES = 2_000_000; // 2 MB cap
-        const entries = projectFilesRef.current.filter(
-          (e) => e.kind !== 'folder' && e.id && e.entityType === 'doc' && TEXT_EXTS.has(e.ext.startsWith('.') ? e.ext.toLowerCase() : `.${e.ext.toLowerCase()}`)
-        ).slice(0, MAX_PROJECT_FILES);
+        const entries = projectFilesRef.current
+          .filter(
+            (e) =>
+              e.kind !== 'folder' &&
+              e.id &&
+              e.entityType === 'doc' &&
+              TEXT_EXTS.has(
+                e.ext.startsWith('.')
+                  ? e.ext.toLowerCase()
+                  : `.${e.ext.toLowerCase()}`
+              )
+          )
+          .slice(0, MAX_PROJECT_FILES);
         if (entries.length === 0) return [];
         const pid = getOverleafProjectIdFromPathname(window.location.pathname);
         if (!pid) return [];
         const results: Array<{ path: string; content: string }> = [];
         let totalBytes = 0;
-        await mapWithConcurrency(entries, MAX_CONCURRENT_DOWNLOADS, async (entry) => {
-          if (totalBytes >= MAX_TOTAL_BYTES) return;
-          for (const prefix of ['/Project/', '/project/']) {
-            try {
-              const url = `${prefix}${encodeURIComponent(pid)}/doc/${encodeURIComponent(entry.id!)}/download`;
-              const resp = await fetch(url, { credentials: 'include' });
-              if (resp.ok) {
-                const content = await resp.text();
-                if (totalBytes + content.length <= MAX_TOTAL_BYTES) {
-                  totalBytes += content.length;
-                  results.push({ path: entry.path, content });
+        await mapWithConcurrency(
+          entries,
+          MAX_CONCURRENT_DOWNLOADS,
+          async (entry) => {
+            if (totalBytes >= MAX_TOTAL_BYTES) return;
+            for (const prefix of ['/Project/', '/project/']) {
+              try {
+                const url = `${prefix}${encodeURIComponent(pid)}/doc/${encodeURIComponent(entry.id!)}/download`;
+                const resp = await fetch(url, { credentials: 'include' });
+                if (resp.ok) {
+                  const content = await resp.text();
+                  if (totalBytes + content.length <= MAX_TOTAL_BYTES) {
+                    totalBytes += content.length;
+                    results.push({ path: entry.path, content });
+                  }
+                  return;
                 }
-                return;
+              } catch {
+                /* try next prefix */
               }
-            } catch { /* try next prefix */ }
+            }
           }
-        });
+        );
         return results;
       })();
 
@@ -7238,28 +7420,33 @@ const Panel = () => {
       const payload =
         provider === 'pi'
           ? {
-            provider: 'pi' as const,
-            action,
-            runtime: {
-              pi: {
-                provider: options.piProvider ?? undefined,
-                model: currentModel ?? options.piModel ?? undefined,
-                thinkingLevel: (currentThinkingMode === 'ultra' ? 'xhigh' : currentThinkingMode) ?? options.piThinkingLevel ?? 'off',
-                conversationId: sessionConversationId,
+              provider: 'pi' as const,
+              action,
+              runtime: {
+                pi: {
+                  provider: options.piProvider ?? undefined,
+                  model: currentModel ?? options.piModel ?? undefined,
+                  thinkingLevel:
+                    (currentThinkingMode === 'ultra'
+                      ? 'xhigh'
+                      : currentThinkingMode) ??
+                    options.piThinkingLevel ??
+                    'off',
+                  conversationId: sessionConversationId,
+                },
               },
-            },
-            overleaf: { url: window.location.href },
-            context: sharedContext,
-            policy: {
-              requireApproval: false,
-              allowNetwork: false,
-              maxFiles: 1,
-            },
-            userSettings: sharedUserSettings,
-            ...(projectFilesForContext.length > 0 ? { projectFiles: projectFilesForContext } : {}),
-          }
+              overleaf: { url: window.location.href },
+              context: sharedContext,
+              policy: {
+                requireApproval: false,
+                allowNetwork: false,
+                maxFiles: 1,
+              },
+              userSettings: sharedUserSettings,
+              ...(projectFilesForContext.length > 0 ? { projectFiles: projectFilesForContext } : {}),
+            }
           : provider === 'codex'
-            ? {
+          ? {
               provider: 'codex' as const,
               action,
               runtime: {
@@ -7278,9 +7465,11 @@ const Panel = () => {
                 maxFiles: 1,
               },
               userSettings: sharedUserSettings,
-              ...(projectFilesForContext.length > 0 ? { projectFiles: projectFilesForContext } : {}),
+              ...(projectFilesForContext.length > 0
+                ? { projectFiles: projectFilesForContext }
+                : {}),
             }
-            : {
+          : {
               provider: 'claude' as const,
               action,
               runtime: {
@@ -7304,7 +7493,9 @@ const Panel = () => {
                 enableCommandBlocklist: options.enableCommandBlocklist,
                 blockedCommandsUnix: options.blockedCommandsUnix,
               },
-              ...(projectFilesForContext.length > 0 ? { projectFiles: projectFilesForContext } : {}),
+              ...(projectFilesForContext.length > 0
+                ? { projectFiles: projectFilesForContext }
+                : {}),
             };
 
       const { jobId } = await createJob(options, payload, {
@@ -7441,11 +7632,7 @@ const Panel = () => {
               provider,
               ...(currentModel ? { model: currentModel } : {}),
               requestSummary: 'Insert proposed text at recorded cursor',
-              contextCategories: [
-                'active-file',
-                'cursor',
-                'adjacent-anchors',
-              ],
+              contextCategories: ['active-file', 'cursor', 'adjacent-anchors'],
             },
           });
           const transaction = await transactionRpc<EditTransactionV1>(
@@ -7807,11 +7994,11 @@ const Panel = () => {
               sessionState.statusPrefix = trimmed;
               const elapsedSeconds = sessionState.activityStartTime
                 ? Math.max(
-                  0,
-                  Math.floor(
-                    (Date.now() - sessionState.activityStartTime) / 1000
+                    0,
+                    Math.floor(
+                      (Date.now() - sessionState.activityStartTime) / 1000
+                    )
                   )
-                )
                 : null;
               const status = formatStreamingStatusLine(trimmed, elapsedSeconds);
               if (sessionConversationId === chatConversationIdRef.current) {
@@ -7880,8 +8067,12 @@ const Panel = () => {
                   const next = new Map(prev);
                   next.set(toolId, {
                     ...existing,
-                    ...(toolInput && !existing.input ? { input: toolInput } : {}),
-                    ...(description && !existing.description ? { description } : {}),
+                    ...(toolInput && !existing.input
+                      ? { input: toolInput }
+                      : {}),
+                    ...(description && !existing.description
+                      ? { description }
+                      : {}),
                   });
                   return next;
                 });
@@ -8030,7 +8221,8 @@ const Panel = () => {
                   return next;
                 });
 
-                const removeDelayMs = resolvedPhase === 'completed' ? 1200 : 3000;
+                const removeDelayMs =
+                  resolvedPhase === 'completed' ? 1200 : 3000;
                 setTimeout(() => {
                   setActiveTools((curr) => {
                     if (!curr.has(toolId)) return curr;
@@ -8123,11 +8315,11 @@ const Panel = () => {
               sessionState.statusPrefix = `Reviewing: ${displayPath}`;
               const elapsedSeconds = sessionState.activityStartTime
                 ? Math.max(
-                  0,
-                  Math.floor(
-                    (Date.now() - sessionState.activityStartTime) / 1000
+                    0,
+                    Math.floor(
+                      (Date.now() - sessionState.activityStartTime) / 1000
+                    )
                   )
-                )
                 : null;
               const status = formatStreamingStatusLine(
                 `Reviewing: ${displayPath}`,
@@ -8157,10 +8349,7 @@ const Panel = () => {
               patchFeedbackTargetActive.conversationId === sessionConversationId
             ) {
               const expectedKind = patchFeedbackTargetActive.kind;
-              if (
-                patch.kind === 'replaceSelection' ||
-                patch.kind === 'replaceRangeInFile'
-              ) {
+              if (patch.kind === expectedKind) {
                 const directIndex = patchFeedbackTargetActive.messageIndex;
                 const directTarget = conversation.messages[directIndex];
                 const directReview = directTarget?.patchReview;
@@ -8192,11 +8381,150 @@ const Panel = () => {
                 }
 
                 if (targetIndex >= 0) {
+                  const feedbackTarget = patchFeedbackTargetActive;
                   const storedTarget = conversation.messages[targetIndex]!;
                   const targetReview = storedTarget.patchReview as StoredPatchReview & {
-                    kind: 'replaceSelection' | 'replaceRangeInFile';
+                    kind:
+                      | 'replaceSelection'
+                      | 'replaceRangeInFile'
+                      | 'insertAtCursor';
                     text: string;
                   };
+                  if (feedbackTarget.supersedeOriginal) {
+                    const supersedeOriginal = feedbackTarget.supersedeOriginal;
+                    const messageId = feedbackTarget.messageId;
+                    patchFeedbackResponseHandled = true;
+                    patchFeedbackTargetActive = null;
+                    void (async () => {
+                      const original = await transactionRpc<EditTransactionV1 | null>(
+                        'get',
+                        {
+                          projectId: supersedeOriginal.projectId,
+                          id: supersedeOriginal.transactionId,
+                        }
+                      );
+                      if (!original) {
+                        throw new Error(
+                          'Regenerated proposal original transaction is missing'
+                        );
+                      }
+                      let result: SupersedeTransactionResultV1;
+                      if (
+                        original.state === 'superseded' &&
+                        original.supersededByTransactionId
+                      ) {
+                        result = {
+                          original,
+                          successor:
+                            (await transactionRpc<EditTransactionV1 | null>(
+                              'getSuccessor',
+                              {
+                                projectId: original.projectId,
+                                id: original.id,
+                              }
+                            )) ?? undefined,
+                        };
+                      } else {
+                        result =
+                          await transactionRpc<SupersedeTransactionResultV1>(
+                            'supersedeProposal',
+                            {
+                              projectId: original.projectId,
+                              id: original.id,
+                              expectedRevision: original.revision,
+                              replacementText: patch.text,
+                            }
+                          );
+                      }
+                      const successor = result.successor;
+                      if (!successor) {
+                        throw new Error(
+                          'Regenerated proposal did not create a durable successor'
+                        );
+                      }
+
+                      const latestState = chatStateRef.current;
+                      if (!latestState) return;
+                      const latestConversation = findConversation(
+                        latestState,
+                        sessionConversationId
+                      );
+                      if (!latestConversation) return;
+                      let latestTargetIndex = feedbackTarget.messageIndex;
+                      const directLatest =
+                        latestConversation.messages[latestTargetIndex]?.patchReview;
+                      if (
+                        !directLatest ||
+                        directLatest.kind !== feedbackTarget.kind ||
+                        getPatchFeedbackAnchorKey(directLatest) !==
+                          feedbackTarget.anchorKey
+                      ) {
+                        latestTargetIndex = latestConversation.messages.findIndex(
+                          (entry) =>
+                            entry.patchReview?.kind === feedbackTarget.kind &&
+                            getPatchFeedbackAnchorKey(entry.patchReview) ===
+                              feedbackTarget.anchorKey
+                        );
+                      }
+                      if (latestTargetIndex < 0) {
+                        throw new Error(
+                          'Regenerated proposal review projection is missing'
+                        );
+                      }
+                      const latestStored =
+                        latestConversation.messages[latestTargetIndex]!;
+                      if (!latestStored.patchReview) {
+                        throw new Error(
+                          'Regenerated proposal review projection is missing'
+                        );
+                      }
+                      const updatedStoredMessages = [
+                        ...latestConversation.messages,
+                      ];
+                      updatedStoredMessages[latestTargetIndex] = {
+                        ...latestStored,
+                        patchReview: projectSuccessorPatchReview(
+                          latestStored.patchReview,
+                          successor
+                        ),
+                      };
+                      chatStateRef.current = setConversationMessages(
+                        latestState,
+                        latestConversation.provider,
+                        sessionConversationId,
+                        updatedStoredMessages
+                      );
+                      scheduleChatSave();
+
+                      if (
+                        sessionConversationId === chatConversationIdRef.current
+                      ) {
+                        setMessages((previous) =>
+                          previous.map((entry) =>
+                            entry.id === messageId && entry.patchReview
+                              ? {
+                                  ...entry,
+                                  patchReview: projectSuccessorPatchReview(
+                                    entry.patchReview,
+                                    successor
+                                  ),
+                                }
+                              : entry
+                          )
+                        );
+                        clearPatchErrorForMessage(messageId);
+                      }
+                    })().catch((error) => {
+                      setPatchActionErrors((previous) => ({
+                        ...previous,
+                        [messageId]:
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                      }));
+                    });
+                    return;
+                  }
                   const updatedStoredMessages = [...conversation.messages];
                   updatedStoredMessages[targetIndex] = {
                     ...storedTarget,
@@ -8265,8 +8593,14 @@ const Panel = () => {
               selectionSnapshotsRef.current.delete(jobId);
               // Guard: discard replaceSelection patches without a valid selection
               // snapshot — they can't be applied and would produce ghost review cards.
-              if (!snapshot || !(snapshot.to > snapshot.from) || !snapshot.selection?.trim()) {
-                console.trace('[ageaf] discarding replaceSelection patch: no valid selection snapshot');
+              if (
+                !snapshot ||
+                !(snapshot.to > snapshot.from) ||
+                !snapshot.selection?.trim()
+              ) {
+                console.trace(
+                  '[ageaf] discarding replaceSelection patch: no valid selection snapshot'
+                );
                 return;
               }
               void captureReplacementPatchMessage({
@@ -8307,17 +8641,17 @@ const Panel = () => {
             const normalizedStatus = rawStatus.toLowerCase();
             const status =
               normalizedStatus === 'complete' ||
-                normalizedStatus === 'success' ||
-                normalizedStatus === 'ok'
+              normalizedStatus === 'success' ||
+              normalizedStatus === 'ok'
                 ? 'ok'
                 : normalizedStatus;
             const message =
               typeof (event.data as any)?.message === 'string' &&
-                String((event.data as any).message).trim()
+              String((event.data as any).message).trim()
                 ? String((event.data as any).message)
                 : status === 'ok'
-                  ? undefined
-                  : `Job finished with status "${rawStatus}"`;
+                ? undefined
+                : `Job finished with status "${rawStatus}"`;
             sessionState.pendingDone = {
               status,
               message,
@@ -8607,19 +8941,25 @@ const Panel = () => {
     if (!conversationId) return;
 
     if (!editorEmpty) {
-      setMessages((prev) => [...prev, createMessage({
-        role: 'system',
-        content: 'Clear the message input before checking references.',
-      })]);
+      setMessages((prev) => [
+        ...prev,
+        createMessage({
+          role: 'system',
+          content: 'Clear the message input before checking references.',
+        }),
+      ]);
       return;
     }
 
     const sessionState = getSessionState(conversationId);
     if (sessionState.isSending) {
-      setMessages((prev) => [...prev, createMessage({
-        role: 'system',
-        content: 'Please wait for the current response to finish.',
-      })]);
+      setMessages((prev) => [
+        ...prev,
+        createMessage({
+          role: 'system',
+          content: 'Please wait for the current response to finish.',
+        }),
+      ]);
       return;
     }
 
@@ -8660,7 +9000,9 @@ const Panel = () => {
 
     // Step 2: Fetch bib content
     // Primary: doc-download API using docId (path-independent, no basename ambiguity)
-    const projectId = getOverleafProjectIdFromPathname(window.location.pathname);
+    const projectId = getOverleafProjectIdFromPathname(
+      window.location.pathname
+    );
     let bibContent: string | null = null;
 
     if (projectId && bibEntry.id) {
@@ -8668,8 +9010,13 @@ const Panel = () => {
         try {
           const url = `${prefix}${encodeURIComponent(projectId)}/doc/${encodeURIComponent(bibEntry.id)}/download`;
           const resp = await fetch(url, { credentials: 'include' });
-          if (resp.ok) { bibContent = await resp.text(); break; }
-        } catch { /* try next */ }
+          if (resp.ok) {
+            bibContent = await resp.text();
+            break;
+          }
+        } catch {
+          /* try next */
+        }
       }
     }
 
@@ -8679,19 +9026,28 @@ const Panel = () => {
         if (!ref) continue;
         try {
           const result = await bridge.requestFileContent(ref);
-          if (result?.ok && typeof result.content === 'string' && result.content.length > 0) {
+          if (
+            result?.ok &&
+            typeof result.content === 'string' &&
+            result.content.length > 0
+          ) {
             bibContent = result.content;
             break;
           }
-        } catch { /* try next */ }
+        } catch {
+          /* try next */
+        }
       }
     }
 
     if (bibContent == null) {
-      setMessages((prev) => [...prev, createMessage({
-        role: 'system',
-        content: `Unable to read ${bibEntry.path}. Try opening the file in Overleaf first.`,
-      })]);
+      setMessages((prev) => [
+        ...prev,
+        createMessage({
+          role: 'system',
+          content: `Unable to read ${bibEntry.path}. Try opening the file in Overleaf first.`,
+        }),
+      ]);
       return;
     }
 
@@ -8786,7 +9142,9 @@ const Panel = () => {
     const allEntries = detectProjectFilesFromDom().filter(
       (entry) => entry.kind !== 'folder'
     );
-    const projectId = getOverleafProjectIdFromPathname(window.location.pathname);
+    const projectId = getOverleafProjectIdFromPathname(
+      window.location.pathname
+    );
     const projectFiles: ProjectFile[] = allEntries.map((entry) => ({
       path: entry.path,
       name: entry.name,
@@ -8850,7 +9208,10 @@ const Panel = () => {
     let totalBytes = 0;
     let failedLatexInputReads = 0;
 
-    const enqueueEntry = (entry: OverleafEntry, origin: NotationEntryOrigin) => {
+    const enqueueEntry = (
+      entry: OverleafEntry,
+      origin: NotationEntryOrigin
+    ) => {
       const normalizedPath = entry.path.trim();
       if (!normalizedPath) return;
       const normalizedExt = normalizeExt(
@@ -9204,7 +9565,8 @@ const Panel = () => {
   ): Promise<EditTransactionV1> => {
     if (!patchReview.transactionId || !patchReview.projectId) {
       throw new Error(
-        patchReview.transactionError ?? 'Durable edit target identity is unavailable'
+        patchReview.transactionError ??
+          'Durable edit target identity is unavailable'
       );
     }
     let transaction = await transactionRpc<EditTransactionV1 | null>('get', {
@@ -9226,7 +9588,97 @@ const Panel = () => {
     if (!transaction) {
       throw new Error('Durable edit transaction is missing');
     }
+    if (
+      transaction.state === 'superseded' &&
+      transaction.supersededByTransactionId
+    ) {
+      const successor = await transactionRpc<EditTransactionV1 | null>(
+        'getSuccessor',
+        { projectId: transaction.projectId, id: transaction.id }
+      );
+      if (!successor) {
+        throw new Error('Durable successor transaction is missing');
+      }
+      transaction = successor;
+    }
     return transaction;
+  };
+
+  const projectSupersedeResult = (
+    messageId: string,
+    result: SupersedeTransactionResultV1
+  ) => {
+    const successor = result.successor;
+    if (!successor) {
+      updatePatchReviewMessage(messageId, (current) => ({
+        ...current,
+        transactionRevision: result.original.revision,
+        conflictPreview: result.original.conflict,
+        transactionError: undefined,
+      }));
+      return;
+    }
+    updatePatchReviewMessage(messageId, (current) =>
+      projectSuccessorPatchReview(current, successor)
+    );
+  };
+
+  const onStrictRebasePatchReviewMessage = async (messageId: string) => {
+    if (patchActionBusyId || bulkActionBusy) return;
+    const review = messagesRef.current.find(
+      (entry) => entry.id === messageId
+    )?.patchReview;
+    if (!review?.transactionId || !review.projectId) return;
+    setPatchActionBusyId(messageId);
+    clearPatchErrorForMessage(messageId);
+    try {
+      const transaction = await getDurableReviewTransaction(review);
+      const result = await transactionRpc<SupersedeTransactionResultV1>(
+        'strictRebase',
+        {
+          projectId: transaction.projectId,
+          id: transaction.id,
+          expectedRevision: transaction.revision,
+        }
+      );
+      projectSupersedeResult(messageId, result);
+    } catch (error) {
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        [messageId]: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPatchActionBusyId(null);
+    }
+  };
+
+  const onRetargetPatchReviewMessage = async (messageId: string) => {
+    if (patchActionBusyId || bulkActionBusy) return;
+    const review = messagesRef.current.find(
+      (entry) => entry.id === messageId
+    )?.patchReview;
+    if (!review?.transactionId || !review.projectId) return;
+    setPatchActionBusyId(messageId);
+    clearPatchErrorForMessage(messageId);
+    try {
+      const transaction = await getDurableReviewTransaction(review);
+      const result = await transactionRpc<SupersedeTransactionResultV1>(
+        'retarget',
+        {
+          projectId: transaction.projectId,
+          id: transaction.id,
+          expectedRevision: transaction.revision,
+        }
+      );
+      projectSupersedeResult(messageId, result);
+    } catch (error) {
+      setPatchActionErrors((previous) => ({
+        ...previous,
+        [messageId]: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPatchActionBusyId(null);
+    }
   };
 
   const rejectDurableReviewTransaction = async (
@@ -9238,8 +9690,8 @@ const Panel = () => {
     }
     if (transaction.state !== 'rejected') {
       transaction = await transactionRpc<EditTransactionV1>('reject', {
-        projectId: patchReview.projectId,
-        id: patchReview.transactionId,
+        projectId: transaction.projectId,
+        id: transaction.id,
         expectedRevision: transaction.revision,
       });
     }
@@ -9251,20 +9703,32 @@ const Panel = () => {
 
   const onRejectPatchReviewMessage = async (messageId: string) => {
     if (bulkActionBusy) return;
-    const latest = messagesRef.current.find((message) => message.id === messageId);
+    const latest = messagesRef.current.find(
+      (message) => message.id === messageId
+    );
     const patchReview = latest?.patchReview;
     if (!patchReview) return;
-    const prevStatus = ((patchReview as any).status ?? 'pending') as PatchReviewStatus;
+    const prevStatus = ((patchReview as any).status ??
+      'pending') as PatchReviewStatus;
     if (prevStatus !== 'pending') return;
     setPatchActionBusyId(messageId);
     try {
       const transaction = await rejectDurableReviewTransaction(patchReview);
-      updatePatchReviewMessage(messageId, (current) => ({
-        ...current,
-        status: 'rejected',
-        transactionRevision: transaction.revision,
-        transactionError: undefined,
-      }));
+      updatePatchReviewMessage(messageId, (current) => {
+        const projected =
+          current.transactionId !== transaction.id
+            ? projectSuccessorPatchReview(current, transaction)
+            : current;
+        return {
+          ...projected,
+          status: 'rejected',
+          transactionId: transaction.id,
+          projectId: transaction.projectId,
+          transactionRevision: transaction.revision,
+          conflictPreview: undefined,
+          transactionError: undefined,
+        };
+      });
     } catch (error) {
       setPatchActionErrors((previous) => ({
         ...previous,
@@ -9291,8 +9755,8 @@ const Panel = () => {
     if (status !== 'pending') return;
 
     if (
-      patchReview.kind !== 'replaceSelection' &&
-      patchReview.kind !== 'replaceRangeInFile'
+      patchReview.kind === 'insertAtCursor' &&
+      !patchReview.conflictPreview
     ) {
       return;
     }
@@ -9303,12 +9767,16 @@ const Panel = () => {
     const fileHint =
       patchReview.kind === 'replaceRangeInFile'
         ? patchReview.filePath
-        : patchReview.fileName ?? getActiveFilename() ?? 'snippet.tex';
+        : patchReview.kind === 'replaceSelection'
+        ? patchReview.fileName ?? getActiveFilename() ?? 'snippet.tex'
+        : patchReview.conflictPreview?.target.filePath ?? 'cursor';
 
     const oldText =
       patchReview.kind === 'replaceSelection'
         ? patchReview.selection
-        : patchReview.expectedOldText;
+        : patchReview.kind === 'replaceRangeInFile'
+        ? patchReview.expectedOldText
+        : patchReview.conflictPreview?.currentObservedText ?? '';
     const newText =
       typeof overrideText === 'string' ? overrideText : patchReview.text;
 
@@ -9330,17 +9798,19 @@ const Panel = () => {
     }
 
     const lineFrom =
-      patchReview.kind === 'replaceSelection'
-        ? patchReview.lineFrom
-        : undefined;
+      patchReview.kind === 'replaceSelection' ? patchReview.lineFrom : undefined;
     const lineTo =
       patchReview.kind === 'replaceSelection' ? patchReview.lineTo : undefined;
 
-    const promptLine1 =
-      'Please refine the proposed change below based on my feedback.';
+    const promptLine1 = patchReview.conflictPreview
+      ? 'Please regenerate this conflicted proposal using the recorded target and conflict context below.'
+      : 'Please refine the proposed change below based on my feedback.';
     const promptLine2 = `Respond with exactly one ageaf-patch code block with kind ${patchReview.kind} and ONLY the updated proposal.`;
     const targetLine = `Target: ${fileHint}`;
-    const combined = `${promptLine1}\n${promptLine2}\n${targetLine}\n\nCurrent text:\n\n${oldText}\n\nProposed text:\n\n${newText}\n\nFeedback:\n`;
+    const conflictContext = patchReview.conflictPreview
+      ? `\nConflict code: ${patchReview.conflictPreview.conflictCode}\nRecorded expected content:\n\n${patchReview.conflictPreview.expectedText}\n\nCurrent observed content:\n\n${patchReview.conflictPreview.currentObservedText}\n\nCandidate count: ${patchReview.conflictPreview.candidateCount}\nStrict rebase available: ${patchReview.conflictPreview.strictRebaseAvailable ? 'yes' : 'no'}\n`
+      : '';
+    const combined = `${promptLine1}\n${promptLine2}\n${targetLine}${conflictContext}\n\nCurrent text:\n\n${oldText}\n\nProposed text:\n\n${newText}\n\nFeedback:\n`;
     insertChipFromText(combined, fileHint, lineFrom, lineTo);
 
     editorRef.current?.focus();
@@ -9352,6 +9822,16 @@ const Panel = () => {
       messageIndex,
       kind: patchReview.kind,
       anchorKey: getPatchFeedbackAnchorKey(patchReview),
+      ...(patchReview.conflictPreview &&
+      patchReview.projectId &&
+      patchReview.transactionId
+        ? {
+            supersedeOriginal: {
+              projectId: patchReview.projectId,
+              transactionId: patchReview.transactionId,
+            },
+          }
+        : {}),
     };
   };
 
@@ -9431,8 +9911,9 @@ const Panel = () => {
   };
 
   const describeOperationFailure = (operation: EditOperationV1) => {
-    const stage = operation.fileBatches.find((batch) => batch.failureStage)
-      ?.failureStage;
+    const stage = operation.fileBatches.find(
+      (batch) => batch.failureStage
+    )?.failureStage;
     if (operation.state === 'recovery_required') {
       return {
         outcome: 'recovery-required' as const,
@@ -9450,7 +9931,8 @@ const Panel = () => {
     if (stage === 'preflight') {
       return {
         outcome: 'preflight-rejected' as const,
-        message: 'Preflight rejected the selected batch; no editor mutation occurred.',
+        message:
+          'Preflight rejected the selected batch; no editor mutation occurred.',
       };
     }
     return {
@@ -9610,7 +10092,10 @@ const Panel = () => {
       const selections = messagesRef.current
         .filter((message) => {
           if (!message.patchReview) return false;
-          return ((message.patchReview as any).status ?? 'pending') === 'pending';
+          return (
+            ((message.patchReview as any).status ?? 'pending') === 'pending' &&
+            !message.patchReview.conflictPreview
+          );
         })
         .map((message) => ({
           messageId: message.id,
@@ -9690,8 +10175,9 @@ const Panel = () => {
           const patchReview = entry.patchReview;
           return Boolean(
             patchReview &&
-            patchReview.kind === 'replaceRangeInFile' &&
-            patchReview.filePath.toLowerCase() === fileKey
+              patchReview.kind === 'replaceRangeInFile' &&
+              patchReview.filePath.toLowerCase() === fileKey &&
+              !patchReview.conflictPreview
           );
         })
         .filter(
@@ -9815,9 +10301,13 @@ const Panel = () => {
   const onAcceptPatchReviewRef = useRef(onAcceptPatchReviewMessage);
   const onFeedbackPatchReviewRef = useRef(onFeedbackPatchReviewMessage);
   const onRejectPatchReviewRef = useRef(onRejectPatchReviewMessage);
+  const onStrictRebasePatchReviewRef = useRef(onStrictRebasePatchReviewMessage);
+  const onRetargetPatchReviewRef = useRef(onRetargetPatchReviewMessage);
   onAcceptPatchReviewRef.current = onAcceptPatchReviewMessage;
   onFeedbackPatchReviewRef.current = onFeedbackPatchReviewMessage;
   onRejectPatchReviewRef.current = onRejectPatchReviewMessage;
+  onStrictRebasePatchReviewRef.current = onStrictRebasePatchReviewMessage;
+  onRetargetPatchReviewRef.current = onRetargetPatchReviewMessage;
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -9834,6 +10324,18 @@ const Panel = () => {
         return;
       }
       if (detail.action === 'feedback') {
+        onFeedbackPatchReviewRef.current(detail.messageId, detail.text);
+        return;
+      }
+      if (detail.action === 'strict-rebase') {
+        void onStrictRebasePatchReviewRef.current(detail.messageId);
+        return;
+      }
+      if (detail.action === 'retarget') {
+        void onRetargetPatchReviewRef.current(detail.messageId);
+        return;
+      }
+      if (detail.action === 'regenerate') {
         onFeedbackPatchReviewRef.current(detail.messageId, detail.text);
         return;
       }
@@ -9889,20 +10391,20 @@ const Panel = () => {
             patchReview.kind === 'replaceSelection'
               ? patchReview.from
               : patchReview.kind === 'replaceRangeInFile'
-                ? patchReview.from
-                : undefined,
+              ? patchReview.from
+              : undefined,
           to:
             patchReview.kind === 'replaceSelection'
               ? patchReview.to
               : patchReview.kind === 'replaceRangeInFile'
-                ? patchReview.to
-                : undefined,
+              ? patchReview.to
+              : undefined,
           oldText:
             patchReview.kind === 'replaceSelection'
               ? patchReview.selection
               : patchReview.kind === 'replaceRangeInFile'
-                ? patchReview.expectedOldText
-                : '',
+              ? patchReview.expectedOldText
+              : '',
           newText: 'text' in patchReview ? patchReview.text : '',
           filePath:
             patchReview.kind === 'replaceRangeInFile'
@@ -10093,9 +10595,15 @@ const Panel = () => {
 
       // Sync skillTrustMode to host (fire-and-forget, non-blocking)
       if (settings.skillTrustMode) {
-        updatePiRuntimePreferences(settings, { skillTrustMode: settings.skillTrustMode }).then(
-          () => { lastSyncedTrustModeRef.current = settings.skillTrustMode ?? null; },
-          (err) => { console.warn('[Ageaf] Failed to sync skillTrustMode:', err); },
+        updatePiRuntimePreferences(settings, {
+          skillTrustMode: settings.skillTrustMode,
+        }).then(
+          () => {
+            lastSyncedTrustModeRef.current = settings.skillTrustMode ?? null;
+          },
+          (err) => {
+            console.warn('[Ageaf] Failed to sync skillTrustMode:', err);
+          }
         );
       }
     } catch (error) {
@@ -10266,8 +10774,8 @@ const Panel = () => {
         sessionState.thinkingTimerId && !sessionState.thinkingComplete
           ? 'Thinking · ESC to interrupt'
           : sessionState.streamTimerId
-            ? 'Streaming · ESC to interrupt'
-            : 'Working · ESC to interrupt';
+          ? 'Streaming · ESC to interrupt'
+          : 'Working · ESC to interrupt';
       setStreamingState(status, true);
     } else {
       setStreamingState(null, false);
@@ -10400,36 +10908,36 @@ const Panel = () => {
   const activeToolRequest = toolRequests[0] ?? null;
   const activeToolQuestions: ToolInputQuestion[] =
     activeToolRequest?.kind === 'user_input' &&
-      Array.isArray(activeToolRequest.params?.questions)
+    Array.isArray(activeToolRequest.params?.questions)
       ? (activeToolRequest.params.questions as unknown[])
-        .map((entry): ToolInputQuestion | null => {
-          if (!entry || typeof entry !== 'object') return null;
-          const id = String((entry as any).id ?? '').trim();
-          if (!id) return null;
-          const header = String((entry as any).header ?? '');
-          const question = String((entry as any).question ?? '');
-          const optionsRaw: unknown[] = Array.isArray((entry as any).options)
-            ? ((entry as any).options as unknown[])
-            : [];
-          const options = optionsRaw
-            .map((option): ToolInputOption | null => {
-              if (!option || typeof option !== 'object') return null;
-              const label = String((option as any).label ?? '').trim();
-              const description = String(
-                (option as any).description ?? ''
-              ).trim();
-              if (!label && !description) return null;
-              return { label, description };
-            })
-            .filter((option): option is ToolInputOption => Boolean(option));
-          return {
-            id,
-            header,
-            question,
-            options: options.length ? options : null,
-          };
-        })
-        .filter((entry): entry is ToolInputQuestion => Boolean(entry))
+          .map((entry): ToolInputQuestion | null => {
+            if (!entry || typeof entry !== 'object') return null;
+            const id = String((entry as any).id ?? '').trim();
+            if (!id) return null;
+            const header = String((entry as any).header ?? '');
+            const question = String((entry as any).question ?? '');
+            const optionsRaw: unknown[] = Array.isArray((entry as any).options)
+              ? ((entry as any).options as unknown[])
+              : [];
+            const options = optionsRaw
+              .map((option): ToolInputOption | null => {
+                if (!option || typeof option !== 'object') return null;
+                const label = String((option as any).label ?? '').trim();
+                const description = String(
+                  (option as any).description ?? ''
+                ).trim();
+                if (!label && !description) return null;
+                return { label, description };
+              })
+              .filter((option): option is ToolInputOption => Boolean(option));
+            return {
+              id,
+              header,
+              question,
+              options: options.length ? options : null,
+            };
+          })
+          .filter((entry): entry is ToolInputQuestion => Boolean(entry))
       : [];
 
   const fileSummary = computeFileSummary(messages);
@@ -10568,9 +11076,7 @@ const Panel = () => {
             />
             <div class="ageaf-panel__title">
               <div class="ageaf-panel__name">Ageaf</div>
-              <div class="ageaf-panel__intro">
-                Your Overleaf Agent
-              </div>
+              <div class="ageaf-panel__intro">Your Overleaf Agent</div>
             </div>
             <div class="ageaf-panel__header-actions">
               <div
@@ -10665,15 +11171,19 @@ const Panel = () => {
                     ? sessionStates.current.get(activeConversationId) ?? null
                     : null;
                   const preStreamCount =
-                    isSending && activeSessionState?.preStreamMessageCount != null
+                    isSending &&
+                    activeSessionState?.preStreamMessageCount != null
                       ? Math.min(
-                        activeSessionState.preStreamMessageCount,
-                        messages.length
-                      )
+                          activeSessionState.preStreamMessageCount,
+                          messages.length
+                        )
                       : messages.length;
 
                   const renderMessageBubble = (message: Message) => {
-                    const content = renderMessageContent(message, latestPatchText);
+                    const content = renderMessageContent(
+                      message,
+                      latestPatchText
+                    );
                     if (!content) return null;
                     const copyResponseText =
                       message.role === 'assistant'
@@ -10774,11 +11284,14 @@ const Panel = () => {
                           {(() => {
                             const hasStreamingCoT = Boolean(
                               settings?.showThinkingAndTools &&
-                              streamingCoT.length > 0
+                                streamingCoT.length > 0
                             );
-                            const isStreamingCoTToggle = Boolean(hasStreamingCoT);
+                            const isStreamingCoTToggle =
+                              Boolean(hasStreamingCoT);
                             const isStreamingCoTExpanded = isStreamingCoTToggle
-                              ? expandedThinkingMessages.has('streaming-thinking')
+                              ? expandedThinkingMessages.has(
+                                  'streaming-thinking'
+                                )
                               : false;
 
                             return (
@@ -10824,7 +11337,9 @@ const Panel = () => {
                           <div
                             class="ageaf-message__content"
                             ref={streamingContentRef}
-                            style={streamingText ? undefined : { display: 'none' }}
+                            style={
+                              streamingText ? undefined : { display: 'none' }
+                            }
                           />
                         </div>
                       ) : null}
@@ -10896,12 +11411,17 @@ const Panel = () => {
                               answers: value ? [value] : [],
                             };
                           }
-                          void respondToToolRequest(activeToolRequest, { answers });
+                          void respondToToolRequest(activeToolRequest, {
+                            answers,
+                          });
                         }}
                       >
                         <div class="ageaf-toolcall__title">Input needed</div>
                         {activeToolQuestions.map((question) => (
-                          <div class="ageaf-toolcall__question" key={question.id}>
+                          <div
+                            class="ageaf-toolcall__question"
+                            key={question.id}
+                          >
                             {question.header ? (
                               <div class="ageaf-toolcall__question-title">
                                 {question.header}
@@ -11043,49 +11563,55 @@ const Panel = () => {
                       {getSelectedModelLabel()}
                     </span>
                   </button>
-                  <div class={`ageaf-runtime__menu${chatProvider === 'pi' ? ' ageaf-runtime__menu--grouped' : ''}`} role="listbox">
-                    {chatProvider === 'pi' ? (
-                      getGroupedRuntimeModels().map((group) => (
-                        <div class="ageaf-runtime__group" key={group.provider}>
-                          <div class="ageaf-runtime__group-label">
-                            {formatProviderName(group.provider)}
-                            <span class="ageaf-runtime__group-arrow">&#x203a;</span>
+                  <div
+                    class={`ageaf-runtime__menu${chatProvider === 'pi' ? ' ageaf-runtime__menu--grouped' : ''}`}
+                    role="listbox"
+                  >
+                    {chatProvider === 'pi'
+                      ? getGroupedRuntimeModels().map((group) => (
+                          <div
+                            class="ageaf-runtime__group"
+                            key={group.provider}
+                          >
+                            <div class="ageaf-runtime__group-label">
+                              {formatProviderName(group.provider)}
+                              <span class="ageaf-runtime__group-arrow">
+                                &#x203a;
+                              </span>
+                            </div>
+                            <div class="ageaf-runtime__group-models">
+                              {group.models.map((model) => (
+                                <button
+                                  class={`ageaf-runtime__option ${isRuntimeModelSelected(model) ? 'is-selected' : ''}`}
+                                  type="button"
+                                  onClick={() => onSelectPiModel(model)}
+                                  key={model.value}
+                                  aria-selected={isRuntimeModelSelected(model)}
+                                >
+                                  <div class="ageaf-runtime__option-title">
+                                    {getRuntimeModelLabel(model)}
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
                           </div>
-                          <div class="ageaf-runtime__group-models">
-                            {group.models.map((model) => (
-                              <button
-                                class={`ageaf-runtime__option ${isRuntimeModelSelected(model) ? 'is-selected' : ''}`}
-                                type="button"
-                                onClick={() => onSelectPiModel(model)}
-                                key={model.value}
-                                aria-selected={isRuntimeModelSelected(model)}
-                              >
-                                <div class="ageaf-runtime__option-title">
-                                  {getRuntimeModelLabel(model)}
-                                </div>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      getOrderedRuntimeModels().map((model) => (
-                        <button
-                          class={`ageaf-runtime__option ${isRuntimeModelSelected(model) ? 'is-selected' : ''}`}
-                          type="button"
-                          onClick={() => onSelectModel(model.value)}
-                          key={model.value}
-                          aria-selected={isRuntimeModelSelected(model)}
-                        >
-                          <div class="ageaf-runtime__option-title">
-                            {getRuntimeModelLabel(model)}
-                          </div>
-                          <div class="ageaf-runtime__option-description">
-                            {getRuntimeModelDescription(model)}
-                          </div>
-                        </button>
-                      ))
-                    )}
+                        ))
+                      : getOrderedRuntimeModels().map((model) => (
+                          <button
+                            class={`ageaf-runtime__option ${isRuntimeModelSelected(model) ? 'is-selected' : ''}`}
+                            type="button"
+                            onClick={() => onSelectModel(model.value)}
+                            key={model.value}
+                            aria-selected={isRuntimeModelSelected(model)}
+                          >
+                            <div class="ageaf-runtime__option-title">
+                              {getRuntimeModelLabel(model)}
+                            </div>
+                            <div class="ageaf-runtime__option-description">
+                              {getRuntimeModelDescription(model)}
+                            </div>
+                          </button>
+                        ))}
                   </div>
                 </div>
                 <div class="ageaf-runtime__picker">
@@ -11420,7 +11946,10 @@ const Panel = () => {
               </div>
             ) : null}
             {imageAttachments.length > 0 ? (
-              <div class="ageaf-panel__attachments" aria-label="Attached images">
+              <div
+                class="ageaf-panel__attachments"
+                aria-label="Attached images"
+              >
                 {imageAttachments.map((image) => (
                   <div class="ageaf-panel__attachment" key={image.id}>
                     <img
@@ -11508,18 +12037,20 @@ const Panel = () => {
                         {file.kind === 'folder'
                           ? 'Dir'
                           : file.kind === 'tex'
-                            ? 'TeX'
-                            : file.kind === 'bib'
-                              ? 'Bib'
-                              : file.kind === 'img'
-                                ? 'Img'
-                                : 'File'}
+                          ? 'TeX'
+                          : file.kind === 'bib'
+                          ? 'Bib'
+                          : file.kind === 'img'
+                          ? 'Img'
+                          : 'File'}
                       </span>
                       <span class="ageaf-mention__name">{file.name}</span>
                     </button>
                   ))
                 ) : (
-                  <div class="ageaf-mention__empty">No project files found.</div>
+                  <div class="ageaf-mention__empty">
+                    No project files found.
+                  </div>
                 )}
               </div>
             ) : null}
@@ -11774,7 +12305,9 @@ const Panel = () => {
                           {doctorBusy ? 'Running…' : 'Run Doctor'}
                         </button>
                         {doctorError ? (
-                          <p class="ageaf-settings__hint">Doctor error: {doctorError}</p>
+                          <p class="ageaf-settings__hint">
+                            Doctor error: {doctorError}
+                          </p>
                         ) : null}
                         {doctorReport ? (
                           <div aria-live="polite">
@@ -11970,7 +12503,9 @@ const Panel = () => {
                         <option value="review">Review every change</option>
                       </select>
                       <p class="ageaf-settings__hint">
-                        Every document edit waits for your approval. Runtime tool permissions do not change this. Auto-apply arrives after the durable transaction engine.
+                        Every document edit waits for your approval. Runtime
+                        tool permissions do not change this. Auto-apply arrives
+                        after the durable transaction engine.
                       </p>
                       <label class="ageaf-settings__checkbox">
                         <input
@@ -12026,17 +12561,22 @@ const Panel = () => {
                         value={settings.skillTrustMode ?? 'verified'}
                         onChange={(event) =>
                           updateSettings({
-                            skillTrustMode: (event.target as HTMLSelectElement).value as 'verified' | 'open',
+                            skillTrustMode: (event.target as HTMLSelectElement)
+                              .value as 'verified' | 'open',
                           })
                         }
                       >
-                        <option value="verified">Verified only (recommended)</option>
-                        <option value="open">Open ecosystem (any source)</option>
+                        <option value="verified">
+                          Verified only (recommended)
+                        </option>
+                        <option value="open">
+                          Open ecosystem (any source)
+                        </option>
                       </select>
                       <p class="ageaf-settings__hint">
-                        Controls which skill sources are allowed when discovering
-                        new skills. Verified restricts to trusted publishers
-                        (Anthropic, Vercel).
+                        Controls which skill sources are allowed when
+                        discovering new skills. Verified restricts to trusted
+                        publishers (Anthropic, Vercel).
                       </p>
                     </div>
                   ) : null}

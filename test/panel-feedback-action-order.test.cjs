@@ -20,9 +20,13 @@ test('Patch review action buttons are ordered accept, reject, feedback', () => {
   assert.ok(pendingEnd >= 0, 'expected end of pending patch review actions');
   const section = contents.slice(pendingStart, pendingEnd);
 
+  // Conflict recovery has its own explicit Strict rebase → Retarget →
+  // Regenerate → Reject ordering. Locate the ordinary review branch from its
+  // Accept handler so the legacy action-order contract remains scoped to the
+  // non-conflict card.
   const acceptIdx = section.indexOf('onClick={onAccept}');
-  const rejectIdx = section.indexOf('onClick={onReject}');
-  const feedbackIdx = section.indexOf('onClick={onFeedback}');
+  const rejectIdx = section.indexOf('onClick={onReject}', acceptIdx);
+  const feedbackIdx = section.indexOf('onClick={onFeedback}', rejectIdx);
   assert.ok(acceptIdx >= 0, 'expected accept button');
   assert.ok(rejectIdx >= 0, 'expected reject button');
   assert.ok(feedbackIdx >= 0, 'expected feedback button');

@@ -35,6 +35,17 @@ import {
 } from './fileBatch';
 import { sha256Text } from './anchoredInsertion';
 import { buildRecoveryBundle } from './recoveryBundle';
+import {
+  buildConflictPreview,
+  buildStrictRebaseProposal,
+  inspectStrictAnchor,
+  type ConflictFileSnapshotV1,
+} from './conflictResolution';
+
+export type SupersedeTransactionResultV1 = {
+  original: EditTransactionV1;
+  successor?: EditTransactionV1;
+};
 
 export type ApplySelectionCommandV1 = {
   projectId: string;
@@ -71,10 +82,34 @@ export class TransactionService {
 
   async propose(input: ProposeEditTransactionV1): Promise<EditTransactionV1> {
     assertProposal(input);
+    if (input.supersedesTransactionId) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Supersede links require an atomic supersede command'
+      );
+    }
     const timestamp = this.now();
-    const provenance = sanitizeProvenance(input.provenance);
     const fingerprint = proposalFingerprint(input);
-    const transaction: EditTransactionV1 = {
+    const transaction = this.createProposedTransaction(input, timestamp);
+    const event: TransactionJournalEventV1 = {
+      schemaVersion: 1,
+      eventId: this.createId(),
+      transactionId: transaction.id,
+      projectId: transaction.projectId,
+      revision: 0,
+      fromState: null,
+      toState: 'proposed',
+      timestamp,
+    };
+    return this.repository.createOrGet(transaction, event, fingerprint);
+  }
+
+  private createProposedTransaction(
+    input: ProposeEditTransactionV1,
+    timestamp: number
+  ): EditTransactionV1 {
+    const provenance = sanitizeProvenance(input.provenance);
+    return {
       schemaVersion: 1,
       id: this.createId(),
       idempotencyKey: input.idempotencyKey,
@@ -102,17 +137,254 @@ export class TransactionService {
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-    const event: TransactionJournalEventV1 = {
+  }
+
+  async getSuccessor(
+    projectId: string,
+    id: string
+  ): Promise<EditTransactionV1 | null> {
+    const original = await this.requireTransaction(projectId, id);
+    if (!original.supersededByTransactionId) return null;
+    const successor = await this.requireTransaction(
+      projectId,
+      original.supersededByTransactionId
+    );
+    if (successor.supersedesTransactionId !== original.id) {
+      throw new TransactionError(
+        'RECOVERY_REQUIRED',
+        'Supersede relationship is incomplete'
+      );
+    }
+    return successor;
+  }
+
+  async inspectConflict(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    snapshot: ConflictFileSnapshotV1 | null,
+    code: TransactionErrorCode
+  ): Promise<EditTransactionV1> {
+    const current = await this.requireTransaction(projectId, id);
+    if (current.supersededByTransactionId) return current;
+    if (current.revision !== expectedRevision) {
+      throw new TransactionError(
+        'STALE_REVISION',
+        `Expected revision ${expectedRevision}, found ${current.revision}`
+      );
+    }
+    if (!['proposed', 'conflicted', 'failed'].includes(current.state)) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Transaction cannot enter conflict review from its current state'
+      );
+    }
+    const timestamp = this.now();
+    const conflict = await buildConflictPreview(
+      current,
+      snapshot,
+      code,
+      timestamp
+    );
+    const failure = sanitizeFailure(code, timestamp);
+    return this.repository.compareAndSwap(
+      current.id,
+      current.revision,
+      (stored) => {
+        this.assertProjectScope(stored, projectId);
+        const transaction: EditTransactionV1 = {
+          ...stored,
+          state: 'conflicted',
+          revision: stored.revision + 1,
+          updatedAt: timestamp,
+          conflict,
+          failure,
+          expectedPostApplySha256: undefined,
+          pendingApply: undefined,
+        };
+        return {
+          transaction,
+          event: {
+            schemaVersion: 1,
+            eventId: this.createId(),
+            transactionId: stored.id,
+            projectId: stored.projectId,
+            revision: transaction.revision,
+            fromState: stored.state,
+            toState: 'conflicted',
+            timestamp,
+            failure,
+          },
+        };
+      }
+    );
+  }
+
+  async strictRebase(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    snapshot: ConflictFileSnapshotV1
+  ): Promise<SupersedeTransactionResultV1> {
+    const current = await this.requireTransaction(projectId, id);
+    if (current.supersededByTransactionId) {
+      return {
+        original: current,
+        successor: (await this.getSuccessor(projectId, id)) ?? undefined,
+      };
+    }
+    if (current.revision !== expectedRevision) {
+      throw new TransactionError(
+        'STALE_REVISION',
+        `Expected revision ${expectedRevision}, found ${current.revision}`
+      );
+    }
+    const inspection = inspectStrictAnchor(current, snapshot);
+    if (!inspection.strictRebaseAvailable) {
+      const conflicted = await this.inspectConflict(
+        projectId,
+        id,
+        expectedRevision,
+        snapshot,
+        inspection.unavailableReason === 'NO_MATCH'
+          ? 'EXPECTED_TEXT_MISMATCH'
+          : 'AMBIGUOUS_ANCHOR'
+      );
+      return { original: conflicted };
+    }
+    const currentSha256 = await sha256Text(snapshot.content);
+    const proposal = await buildStrictRebaseProposal(
+      current,
+      snapshot,
+      `rebase:${current.id}:${currentSha256}`
+    );
+    return this.supersedeWithProposal(current, expectedRevision, proposal);
+  }
+
+  async retarget(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    proposal: ProposeEditTransactionV1
+  ): Promise<SupersedeTransactionResultV1> {
+    const current = await this.requireTransaction(projectId, id);
+    if (current.supersededByTransactionId) {
+      return {
+        original: current,
+        successor: (await this.getSuccessor(projectId, id)) ?? undefined,
+      };
+    }
+    if (
+      proposal.projectId !== current.projectId ||
+      proposal.intent !== current.intent ||
+      proposal.replacementText !== current.replacementText
+    ) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Retarget proposal does not preserve the recorded edit intent'
+      );
+    }
+    return this.supersedeWithProposal(current, expectedRevision, {
+      ...proposal,
+      supersedesTransactionId: current.id,
+    });
+  }
+
+  async supersedeProposal(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    replacementText: string
+  ): Promise<SupersedeTransactionResultV1> {
+    const current = await this.requireTransaction(projectId, id);
+    if (current.supersededByTransactionId) {
+      return {
+        original: current,
+        successor: (await this.getSuccessor(projectId, id)) ?? undefined,
+      };
+    }
+    if (typeof replacementText !== 'string') {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Replacement text is invalid'
+      );
+    }
+    const textIdentity = await sha256Text(replacementText);
+    return this.supersedeWithProposal(current, expectedRevision, {
+      idempotencyKey: `regenerate:${current.id}:${textIdentity}`,
+      projectId: current.projectId,
+      ...(current.conversationId
+        ? { conversationId: current.conversationId }
+        : {}),
+      ...(current.missionId ? { missionId: current.missionId } : {}),
+      ...(current.sourceJobId ? { sourceJobId: current.sourceJobId } : {}),
+      intent: current.intent,
+      target: { ...current.target },
+      expectedText: current.expectedText,
+      replacementText,
+      prefix: current.prefix,
+      suffix: current.suffix,
+      baseContentSha256: current.baseContentSha256,
+      proposalOrder: current.proposalOrder,
+      ...(current.provenance ? { provenance: current.provenance } : {}),
+      supersedesTransactionId: current.id,
+    });
+  }
+
+  private async supersedeWithProposal(
+    original: EditTransactionV1,
+    expectedRevision: number,
+    proposal: ProposeEditTransactionV1
+  ): Promise<SupersedeTransactionResultV1> {
+    assertProposal(proposal);
+    if (
+      proposal.projectId !== original.projectId ||
+      proposal.supersedesTransactionId !== original.id
+    ) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Successor relationship is invalid'
+      );
+    }
+    const timestamp = this.now();
+    const successor = this.createProposedTransaction(proposal, timestamp);
+    const successorEvent: TransactionJournalEventV1 = {
       schemaVersion: 1,
       eventId: this.createId(),
-      transactionId: transaction.id,
-      projectId: transaction.projectId,
+      transactionId: successor.id,
+      projectId: successor.projectId,
       revision: 0,
       fromState: null,
       toState: 'proposed',
       timestamp,
+      relationship: {
+        kind: 'supersedes',
+        transactionId: original.id,
+      },
     };
-    return this.repository.createOrGet(transaction, event, fingerprint);
+    const originalEvent: TransactionJournalEventV1 = {
+      schemaVersion: 1,
+      eventId: this.createId(),
+      transactionId: original.id,
+      projectId: original.projectId,
+      revision: original.revision + 1,
+      fromState: original.state,
+      toState: 'superseded',
+      timestamp,
+      relationship: {
+        kind: 'superseded-by',
+        transactionId: successor.id,
+      },
+    };
+    const result = await this.repository.supersedeWithSuccessor(
+      original.id,
+      expectedRevision,
+      successor,
+      successorEvent,
+      originalEvent,
+      proposalFingerprint(proposal)
+    );
+    return result;
   }
 
   async get(projectId: string, id: string): Promise<EditTransactionV1 | null> {
@@ -517,8 +789,8 @@ export class TransactionService {
     dependencies: ApplySelectionDependenciesV1
   ): Promise<EditOperationV1> {
     const plannedBatches: DurableFileBatchV1[] = [];
-    try {
-      for (const batch of operation.fileBatches) {
+    for (const batch of operation.fileBatches) {
+      try {
         const plan = await dependencies.preflightFile(batch.request);
         if (
           plan.beforeSha256 !== batch.expectedBaseSha256 ||
@@ -535,11 +807,41 @@ export class TransactionService {
             expectedResultSha256: plan.afterSha256,
           },
         });
+      } catch (error) {
+        const code =
+          error instanceof TransactionError ? error.code : 'APPLY_FAILED';
+        if (
+          [
+            'WRONG_PROJECT',
+            'WRONG_FILE',
+            'STALE_HASH',
+            'EXPECTED_TEXT_MISMATCH',
+            'AMBIGUOUS_ANCHOR',
+          ].includes(code)
+        ) {
+          let snapshot: ConflictFileSnapshotV1 | null = null;
+          try {
+            snapshot = await dependencies.readFile(batch);
+          } catch {
+            snapshot = null;
+          }
+          const members = await this.loadTransactions(
+            operation.projectId,
+            batch.transactionIds
+          );
+          for (const transaction of members) {
+            if (transaction.state !== 'proposed') continue;
+            await this.inspectConflict(
+              operation.projectId,
+              transaction.id,
+              transaction.revision,
+              snapshot,
+              code
+            );
+          }
+        }
+        return this.failProposedOperation(operation, code);
       }
-    } catch (error) {
-      const code =
-        error instanceof TransactionError ? error.code : 'APPLY_FAILED';
-      return this.failProposedOperation(operation, code);
     }
 
     const currentTransactions = await this.loadTransactions(
@@ -1865,7 +2167,7 @@ const ALLOWED_TRANSITIONS: Record<
   preflighted: ['applying', 'conflicted', 'rejected', 'superseded'],
   applying: ['applied', 'conflicted', 'failed'],
   applied: ['reverted'],
-  conflicted: ['preflighted', 'rejected', 'superseded'],
+  conflicted: ['rejected', 'superseded'],
   failed: ['preflighted', 'rejected', 'superseded'],
   rejected: [],
   superseded: [],

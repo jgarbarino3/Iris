@@ -9,6 +9,12 @@ const STYLE_ID = 'ageaf-inline-diff-overlay-style';
 
 type OverlayKind = 'replaceSelection' | 'replaceRangeInFile' | 'insertAtCursor';
 
+type OverlayConflict = {
+  strictRebaseAvailable: boolean;
+  unavailableReason?: string;
+  candidateCount: number;
+};
+
 type OverlayPayload = {
   messageId: string;
   kind: OverlayKind;
@@ -19,6 +25,7 @@ type OverlayPayload = {
   oldText?: string;
   newText?: string;
   projectId?: string | null;
+  conflict?: OverlayConflict;
 };
 
 type OverlayRange = {
@@ -45,6 +52,7 @@ type OverlayWidgetPayload = {
   text: string;
   oldText: string;
   messageId: string;
+  conflict?: OverlayConflict;
 };
 
 let cm6Exports: Cm6Exports | null = null;
@@ -90,7 +98,11 @@ let observedResizeDom: HTMLElement | null = null;
 
 // Bottom-center review bar (per active file)
 let reviewBarEl: HTMLDivElement | null = null;
-let reviewBarItems: Array<{ messageId: string; from: number }> = [];
+let reviewBarItems: Array<{
+  messageId: string;
+  from: number;
+  conflicted: boolean;
+}> = [];
 let reviewBarFileKey: string | null = null;
 let reviewBarFocusedByFile: Map<string, string> = new Map();
 let bulkActionInProgress = false;
@@ -631,12 +643,14 @@ function ensureReviewBar() {
     bulkActionInProgress = true;
     try {
       // Accept must run bottom-up so earlier edits do not shift offsets for later hunks.
-      const sortedItems = [...reviewBarItems].sort((a, b) =>
+      const eligibleItems =
+        action === 'accept'
+          ? reviewBarItems.filter((item) => !item.conflicted)
+          : reviewBarItems;
+      const sortedItems = [...eligibleItems].sort((a, b) =>
         action === 'accept' ? b.from - a.from : a.from - b.from
       );
-      const ids = [...new Set(
-        sortedItems.map((x) => x.messageId)
-      )];
+      const ids = [...new Set(sortedItems.map((x) => x.messageId))];
       for (const id of ids) {
         if (!overlayById.has(String(id))) continue;
         dispatchPanelAction(id, action);
@@ -671,7 +685,7 @@ function ensureReviewBar() {
 
 function updateReviewBar(
   fileKey: string,
-  items: Array<{ messageId: string; from: number }>
+  items: Array<{ messageId: string; from: number; conflicted: boolean }>
 ) {
   const bar = ensureReviewBar();
   reviewBarFileKey = fileKey;
@@ -758,7 +772,10 @@ function matchesActiveFile(
   return active === target || active === base;
 }
 
-function findUniqueRange(fullText: string, needle: string): { from: number; to: number } | null {
+function findUniqueRange(
+  fullText: string,
+  needle: string
+): { from: number; to: number } | null {
   if (!needle) return null;
   const first = fullText.indexOf(needle);
   if (first === -1) return null;
@@ -767,21 +784,34 @@ function findUniqueRange(fullText: string, needle: string): { from: number; to: 
   return { from: first, to: first + needle.length };
 }
 
-function findFirstOccurrence(fullText: string, needle: string): { from: number; to: number } | null {
+function findFirstOccurrence(
+  fullText: string,
+  needle: string
+): { from: number; to: number } | null {
   if (!needle) return null;
   const idx = fullText.indexOf(needle);
   if (idx === -1) return null;
   return { from: idx, to: idx + needle.length };
 }
 
-function findTrimmedRange(fullText: string, needle: string): { from: number; to: number } | null {
+function findTrimmedRange(
+  fullText: string,
+  needle: string
+): { from: number; to: number } | null {
   const trimmed = needle.trim();
   if (!trimmed || trimmed === needle) return null;
   return findUniqueRange(fullText, trimmed);
 }
 
-function findNormalizedRange(fullText: string, needle: string): { from: number; to: number } | null {
-  const normalize = (s: string) => s.replace(/[^\S\n]+/g, ' ').replace(/\n\s*\n/g, '\n').trim();
+function findNormalizedRange(
+  fullText: string,
+  needle: string
+): { from: number; to: number } | null {
+  const normalize = (s: string) =>
+    s
+      .replace(/[^\S\n]+/g, ' ')
+      .replace(/\n\s*\n/g, '\n')
+      .trim();
   const normNeedle = normalize(needle);
   const normFull = normalize(fullText);
   if (!normNeedle) return null;
@@ -861,7 +891,12 @@ function resolveOverlayRange(
     const resolved = findNormalizedRange(fullText, oldText);
     if (resolved) {
       const current = state.sliceDoc(resolved.from, resolved.to);
-      return { from: resolved.from, to: resolved.to, oldText: current, newText };
+      return {
+        from: resolved.from,
+        to: resolved.to,
+        oldText: current,
+        newText,
+      };
     }
   }
 
@@ -874,7 +909,8 @@ function resolveOverlayRange(
         kind: payload.kind,
         oldTextLen: oldText.length,
         oldTextPreview: oldText.slice(0, 200),
-        hasFromTo: typeof payload.from === 'number' && typeof payload.to === 'number',
+        hasFromTo:
+          typeof payload.from === 'number' && typeof payload.to === 'number',
       }
     );
   }
@@ -1048,15 +1084,20 @@ function initializeCm6Overlay(cm6: Cm6Exports) {
       constructor(
         private readonly oldText: string,
         private readonly text: string,
-        private readonly messageId: string
+        private readonly messageId: string,
+        private readonly conflict?: OverlayConflict
       ) {
         super();
       }
 
       eq(other: any) {
-        return other.messageId === this.messageId
-          && other.text === this.text
-          && other.oldText === this.oldText;
+        return (
+          other.messageId === this.messageId &&
+          other.text === this.text &&
+          other.oldText === this.oldText &&
+          JSON.stringify(other.conflict ?? null) ===
+            JSON.stringify(this.conflict ?? null)
+        );
       }
 
       ignoreEvent() {
@@ -1069,7 +1110,12 @@ function initializeCm6Overlay(cm6: Cm6Exports) {
       }
 
       toDOM() {
-        return createWidgetDOM(this.oldText, this.text, this.messageId);
+        return createWidgetDOM(
+          this.oldText,
+          this.text,
+          this.messageId,
+          this.conflict
+        );
       }
     };
   } else {
@@ -1078,13 +1124,18 @@ function initializeCm6Overlay(cm6: Cm6Exports) {
       constructor(
         private readonly oldText: string,
         private readonly text: string,
-        private readonly messageId: string
-      ) { }
+        private readonly messageId: string,
+        private readonly conflict?: OverlayConflict
+      ) {}
 
       eq(other: any) {
-        return other.messageId === this.messageId
-          && other.text === this.text
-          && other.oldText === this.oldText;
+        return (
+          other.messageId === this.messageId &&
+          other.text === this.text &&
+          other.oldText === this.oldText &&
+          JSON.stringify(other.conflict ?? null) ===
+            JSON.stringify(this.conflict ?? null)
+        );
       }
 
       ignoreEvent() {
@@ -1096,7 +1147,12 @@ function initializeCm6Overlay(cm6: Cm6Exports) {
       }
 
       toDOM() {
-        return createWidgetDOM(this.oldText, this.text, this.messageId);
+        return createWidgetDOM(
+          this.oldText,
+          this.text,
+          this.messageId,
+          this.conflict
+        );
       }
     };
   }
@@ -1136,14 +1192,16 @@ function initializeCm6Overlay(cm6: Cm6Exports) {
 
               const rf = Number(entry.replaceFrom);
               const rt = Number(entry.replaceTo);
-              const hasOldRange = Number.isFinite(rf) && Number.isFinite(rt) && rt > rf;
+              const hasOldRange =
+                Number.isFinite(rf) && Number.isFinite(rt) && rt > rf;
 
               // Widget only carries the proposed (new) text; old text stays
               // in the document via a mark decoration so it remains selectable.
               const widget = new WidgetClass(
                 '',
                 entry.text,
-                entry.messageId
+                entry.messageId,
+                entry.conflict
               );
 
               if (hasOldRange) {
@@ -1288,7 +1346,12 @@ function ensureCm6FieldInstalled(view: any) {
   return false;
 }
 
-function createWidgetDOM(oldText: string, text: string, messageId: string): HTMLElement {
+function createWidgetDOM(
+  oldText: string,
+  text: string,
+  messageId: string,
+  conflict?: OverlayConflict
+): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'ageaf-inline-diff-widget';
   wrap.setAttribute('data-message-id', messageId);
@@ -1314,7 +1377,10 @@ function createWidgetDOM(oldText: string, text: string, messageId: string): HTML
   (textEl as HTMLTextAreaElement).value = text;
   textEl.spellcheck = false;
   textEl.setAttribute('aria-label', 'Edit proposed text');
-  textEl.setAttribute('placeholder', 'Edit the proposed text before accepting...');
+  textEl.setAttribute(
+    'placeholder',
+    'Edit the proposed text before accepting...'
+  );
   // Allow editing proposed text like Cursor does.
   (textEl as HTMLTextAreaElement).setAttribute(
     'data-ageaf-proposed-editor',
@@ -1324,8 +1390,9 @@ function createWidgetDOM(oldText: string, text: string, messageId: string): HTML
     try {
       // Reset first so shrink works too.
       (textEl as HTMLTextAreaElement).style.height = 'auto';
-      (textEl as HTMLTextAreaElement).style.height = `${(textEl as HTMLTextAreaElement).scrollHeight
-        }px`;
+      (textEl as HTMLTextAreaElement).style.height = `${
+        (textEl as HTMLTextAreaElement).scrollHeight
+      }px`;
     } catch {
       // ignore
     }
@@ -1339,21 +1406,63 @@ function createWidgetDOM(oldText: string, text: string, messageId: string): HTML
   const actions = document.createElement('div');
   actions.className = 'ageaf-inline-diff-widget__actions';
 
-  const acceptBtn = document.createElement('button');
-  acceptBtn.className = 'ageaf-inline-diff-btn';
-  acceptBtn.textContent = '✓ Accept';
-  acceptBtn.setAttribute('aria-label', 'Accept proposed change');
-  acceptBtn.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const edited = (textEl as HTMLTextAreaElement).value;
-    window.dispatchEvent(
-      new CustomEvent(PANEL_ACTION_EVENT, {
-        detail: { messageId, action: 'accept', text: edited },
-      })
-    );
-  };
-  actions.appendChild(acceptBtn);
+  if (conflict) {
+    const rebaseBtn = document.createElement('button');
+    rebaseBtn.className = 'ageaf-inline-diff-btn';
+    rebaseBtn.textContent = 'Strict rebase';
+    rebaseBtn.disabled = !conflict.strictRebaseAvailable;
+    rebaseBtn.title = conflict.strictRebaseAvailable
+      ? 'Create a rebased successor for review'
+      : `Unavailable: ${
+          conflict.unavailableReason ?? 'no unique exact anchor'
+        }`;
+    rebaseBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      emitOverlayAction(messageId, 'strict-rebase');
+    };
+    actions.appendChild(rebaseBtn);
+
+    const retargetBtn = document.createElement('button');
+    retargetBtn.className = 'ageaf-inline-diff-btn is-feedback';
+    retargetBtn.textContent = 'Retarget';
+    retargetBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      emitOverlayAction(messageId, 'retarget');
+    };
+    actions.appendChild(retargetBtn);
+
+    const regenerateBtn = document.createElement('button');
+    regenerateBtn.className = 'ageaf-inline-diff-btn is-feedback';
+    regenerateBtn.textContent = 'Regenerate';
+    regenerateBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      emitOverlayAction(
+        messageId,
+        'regenerate',
+        (textEl as HTMLTextAreaElement).value
+      );
+    };
+    actions.appendChild(regenerateBtn);
+  } else {
+    const acceptBtn = document.createElement('button');
+    acceptBtn.className = 'ageaf-inline-diff-btn';
+    acceptBtn.textContent = '✓ Accept';
+    acceptBtn.setAttribute('aria-label', 'Accept proposed change');
+    acceptBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const edited = (textEl as HTMLTextAreaElement).value;
+      window.dispatchEvent(
+        new CustomEvent(PANEL_ACTION_EVENT, {
+          detail: { messageId, action: 'accept', text: edited },
+        })
+      );
+    };
+    actions.appendChild(acceptBtn);
+  }
 
   const rejectBtn = document.createElement('button');
   rejectBtn.className = 'ageaf-inline-diff-btn is-reject';
@@ -1366,17 +1475,19 @@ function createWidgetDOM(oldText: string, text: string, messageId: string): HTML
   };
   actions.appendChild(rejectBtn);
 
-  const feedbackBtn = document.createElement('button');
-  feedbackBtn.className = 'ageaf-inline-diff-btn is-feedback';
-  feedbackBtn.textContent = 'Feedback';
-  feedbackBtn.setAttribute('aria-label', 'Give feedback on proposed change');
-  feedbackBtn.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const edited = (textEl as HTMLTextAreaElement).value;
-    emitOverlayAction(messageId, 'feedback', edited);
-  };
-  actions.appendChild(feedbackBtn);
+  if (!conflict) {
+    const feedbackBtn = document.createElement('button');
+    feedbackBtn.className = 'ageaf-inline-diff-btn is-feedback';
+    feedbackBtn.textContent = 'Feedback';
+    feedbackBtn.setAttribute('aria-label', 'Give feedback on proposed change');
+    feedbackBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const edited = (textEl as HTMLTextAreaElement).value;
+      emitOverlayAction(messageId, 'feedback', edited);
+    };
+    actions.appendChild(feedbackBtn);
+  }
 
   wrap.appendChild(actions);
   return wrap;
@@ -1387,9 +1498,7 @@ function setOverlayWidget(
   payload: OverlayWidgetPayload | OverlayWidgetPayload[] | null
 ) {
   if (!cm6Exports || !overlayEffect) return;
-  const list = payload
-    ? (Array.isArray(payload) ? payload : [payload])
-    : [];
+  const list = payload ? (Array.isArray(payload) ? payload : [payload]) : [];
   const nextSignature = list
     .map((entry) =>
       [
@@ -1399,6 +1508,7 @@ function setOverlayWidget(
         entry.from,
         entry.oldText,
         entry.text,
+        JSON.stringify(entry.conflict ?? null),
       ].join('\u0001')
     )
     .join('\u0002');
@@ -1426,7 +1536,7 @@ function renderOverlay() {
     return;
   }
 
-  const activeName = getActiveTabName();            // called ONCE (was 2x)
+  const activeName = getActiveTabName(); // called ONCE (was 2x)
   const activeNameForBar = activeName ?? '';
 
   // --- Single resolution pass (Phase 2) with cross-render cache (Phase 3) ---
@@ -1440,29 +1550,42 @@ function renderOverlay() {
   if (cacheHit) {
     resolved = [];
     for (const payload of overlayById.values()) {
-      if (payload.filePath && !matchesActiveFile(activeName, payload.filePath)) continue;
-      if (payload.fileName && payload.kind === 'replaceSelection'
-        && !matchesActiveFile(activeName, payload.fileName)) continue;
+      if (payload.filePath && !matchesActiveFile(activeName, payload.filePath))
+        continue;
+      if (
+        payload.fileName &&
+        payload.kind === 'replaceSelection' &&
+        !matchesActiveFile(activeName, payload.fileName)
+      )
+        continue;
       // insertAtCursor depends on cursor position — always resolve fresh
       if (payload.kind === 'insertAtCursor') {
         const range = resolveOverlayRange(view, payload);
-        if (range) resolved.push({ messageId: payload.messageId, payload, range });
+        if (range)
+          resolved.push({ messageId: payload.messageId, payload, range });
         continue;
       }
       const cached = resolveCache.get(payload.messageId);
-      if (cached) resolved.push({ messageId: payload.messageId, payload, range: cached });
+      if (cached)
+        resolved.push({ messageId: payload.messageId, payload, range: cached });
     }
   } else {
-    const fullText = view.state.sliceDoc(0, view.state.doc.length);  // ONCE per miss
+    const fullText = view.state.sliceDoc(0, view.state.doc.length); // ONCE per miss
     resolveCache.clear();
     resolved = [];
     for (const payload of overlayById.values()) {
-      if (payload.filePath && !matchesActiveFile(activeName, payload.filePath)) continue;
-      if (payload.fileName && payload.kind === 'replaceSelection'
-        && !matchesActiveFile(activeName, payload.fileName)) continue;
+      if (payload.filePath && !matchesActiveFile(activeName, payload.filePath))
+        continue;
+      if (
+        payload.fileName &&
+        payload.kind === 'replaceSelection' &&
+        !matchesActiveFile(activeName, payload.fileName)
+      )
+        continue;
       const range = resolveOverlayRange(view, payload, fullText);
       resolveCache.set(payload.messageId, range);
-      if (range) resolved.push({ messageId: payload.messageId, payload, range });
+      if (range)
+        resolved.push({ messageId: payload.messageId, payload, range });
     }
     resolveCacheDoc = view.state.doc;
     resolveCacheOverlayVersion = overlaySetVersion;
@@ -1471,7 +1594,11 @@ function renderOverlay() {
 
   // --- Bar items from resolved ---
   const barItems = resolved
-    .map(r => ({ messageId: r.messageId, from: r.range.from }))
+    .map((r) => ({
+      messageId: r.messageId,
+      from: r.range.from,
+      conflicted: Boolean(r.payload.conflict),
+    }))
     .sort((a, b) => a.from - b.from);
   updateReviewBar(activeNameForBar, barItems);
 
@@ -1507,13 +1634,14 @@ function renderOverlay() {
 
   // Try CM6 widget path first if available, but ONLY if the field is actually installed.
   if (cm6Exports && overlayField && overlayEffect) {
-    const widgetPayloads: OverlayWidgetPayload[] = resolved.map(r => ({
+    const widgetPayloads: OverlayWidgetPayload[] = resolved.map((r) => ({
       from: r.range.to,
       replaceFrom: r.range.from,
       replaceTo: r.range.to,
       text: r.range.newText,
       oldText: r.range.oldText,
       messageId: r.messageId,
+      ...(r.payload.conflict ? { conflict: r.payload.conflict } : {}),
     }));
 
     if (ensureCm6FieldInstalled(view)) {
@@ -1561,7 +1689,9 @@ function renderOverlay() {
     return;
   }
   // Reuse from resolved array — if not found, clear (same as original behavior).
-  const lastResolved = resolved.find(r => r.messageId === overlayState.messageId);
+  const lastResolved = resolved.find(
+    (r) => r.messageId === overlayState.messageId
+  );
   if (!lastResolved) {
     clearOverlayElements();
     clearGap();
@@ -1590,7 +1720,9 @@ function renderOverlay() {
       // ignore
     }
     overlayScrollListenerDom = scrollDOM;
-    overlayScrollListenerDom.addEventListener('scroll', scheduleOverlayUpdate, { passive: true });
+    overlayScrollListenerDom.addEventListener('scroll', scheduleOverlayUpdate, {
+      passive: true,
+    });
   }
   if (isDebugEnabled()) {
     logOnce(`rendered:${overlayState.messageId}`, 'rendered overlay', {
@@ -1677,7 +1809,9 @@ function renderOverlay() {
     const autosize = () => {
       try {
         (text as HTMLTextAreaElement).style.height = 'auto';
-        (text as HTMLTextAreaElement).style.height = `${(text as HTMLTextAreaElement).scrollHeight}px`;
+        (text as HTMLTextAreaElement).style.height = `${
+          (text as HTMLTextAreaElement).scrollHeight
+        }px`;
       } catch {
         // ignore
       }
@@ -1694,28 +1828,41 @@ function renderOverlay() {
 
     const accept = document.createElement('button');
     accept.className = 'ageaf-inline-diff-btn';
-    accept.textContent = '✓ Accept';
+    accept.textContent = overlayState.conflict ? 'Strict rebase' : '✓ Accept';
     accept.type = 'button';
+    accept.disabled = Boolean(
+      overlayState.conflict && !overlayState.conflict.strictRebaseAvailable
+    );
+    accept.title =
+      overlayState.conflict?.strictRebaseAvailable === false
+        ? `Unavailable: ${
+            overlayState.conflict.unavailableReason ?? 'no unique exact anchor'
+          }`
+        : '';
     accept.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      emitOverlayAction(
-        overlayState.messageId,
-        'accept',
-        (text as HTMLTextAreaElement).value
-      );
+      if (overlayState.conflict) {
+        emitOverlayAction(overlayState.messageId, 'strict-rebase');
+      } else {
+        emitOverlayAction(
+          overlayState.messageId,
+          'accept',
+          (text as HTMLTextAreaElement).value
+        );
+      }
     });
 
     const feedback = document.createElement('button');
     feedback.className = 'ageaf-inline-diff-btn is-feedback';
-    feedback.textContent = 'Feedback';
+    feedback.textContent = overlayState.conflict ? 'Regenerate' : 'Feedback';
     feedback.type = 'button';
     feedback.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
       emitOverlayAction(
         overlayState.messageId,
-        'feedback',
+        overlayState.conflict ? 'regenerate' : 'feedback',
         (text as HTMLTextAreaElement).value
       );
     });
@@ -1730,8 +1877,19 @@ function renderOverlay() {
       emitOverlayAction(overlayState.messageId, 'reject');
     });
 
+    const retarget = document.createElement('button');
+    retarget.className = 'ageaf-inline-diff-btn is-feedback';
+    retarget.textContent = 'Retarget';
+    retarget.type = 'button';
+    retarget.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      emitOverlayAction(overlayState.messageId, 'retarget');
+    });
+
     actions.appendChild(accept);
     actions.appendChild(reject);
+    if (overlayState.conflict) actions.appendChild(retarget);
     actions.appendChild(feedback);
 
     added.appendChild(text);
@@ -1761,7 +1919,13 @@ function renderOverlay() {
 
 function emitOverlayAction(
   messageId: string | undefined,
-  action: 'accept' | 'reject' | 'feedback',
+  action:
+    | 'accept'
+    | 'reject'
+    | 'feedback'
+    | 'strict-rebase'
+    | 'retarget'
+    | 'regenerate',
   text?: string
 ) {
   if (!messageId) return;
@@ -1957,8 +2121,8 @@ export function registerInlineDiffOverlay() {
         const list = Array.isArray(parsed)
           ? parsed
           : parsed?.messageId
-            ? [parsed]
-            : [];
+          ? [parsed]
+          : [];
         if (list.length > 0) {
           const currentProjectId = getCurrentProjectId();
           for (const stored of list) {
@@ -1992,8 +2156,8 @@ export function registerInlineDiffOverlay() {
           const list = Array.isArray(storedAny)
             ? storedAny
             : storedAny?.messageId
-              ? [storedAny]
-              : [];
+            ? [storedAny]
+            : [];
           if (list.length === 0) return;
           const currentProjectId = getCurrentProjectId();
           for (const stored of list) {
