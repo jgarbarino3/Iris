@@ -6,20 +6,26 @@ import {
   looksLikePlacementIntent,
 } from '../src/prompts/placementGuidance.js';
 
-test('placement guidance instructs a surgical anchored replaceRangeInFile insert', () => {
+test('placement guidance instructs a cursor-free insertAtAnchor placement', () => {
   const g = AUTOMATIC_PLACEMENT_GUIDANCE;
-  // Core mechanism: anchored replaceRangeInFile with a unique expectedOldText, no offsets.
-  assert.match(g, /replaceRangeInFile/);
-  assert.match(g, /expectedOldText/);
+  // Core mechanism: insertAtAnchor with a short unique anchor line + position.
+  assert.match(g, /insertAtAnchor/);
+  assert.match(g, /anchorText/);
+  assert.match(g, /"position"/);
+  assert.match(g, /\bafter\b/);
+  assert.match(g, /\bbefore\b/);
+  // Anchor must be short/unique and text must be only the new content.
   assert.match(g, /unique/i);
-  assert.match(g, /Do NOT include `from`\/`to`/);
+  assert.match(g, /ONLY the new content/);
+  // Extension resolves against the live document (no offsets, no big chunks).
+  assert.match(g, /resolves `anchorText` against the LIVE document/);
   // Must not require a cursor / selection.
   assert.match(g, /no cursor needed/i);
+  // Only one card — no duplicate insertAtCursor/replaceRangeInFile patch.
+  assert.match(g, /Do NOT also emit an `insertAtCursor` or `replaceRangeInFile`/);
   // Must override the copy-paste and AGEAF_FILE_UPDATE defaults for placement intent.
   assert.match(g, /OVERRIDES/);
   assert.match(g, /AGEAF_FILE_UPDATE/);
-  // Must tell the model how to obtain exact anchor text when no file block is attached.
-  assert.match(g, /Read\/Grep|Read the file/i);
   // Must default the target to the active file and not ask / not invent main.tex.
   assert.match(g, /Context\.activeFile/);
   assert.match(g, /Do NOT ask the user which file/i);

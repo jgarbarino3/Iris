@@ -841,6 +841,13 @@ type Patch =
   | { kind: 'replaceSelection'; text: string }
   | { kind: 'insertAtCursor'; text: string }
   | {
+    kind: 'insertAtAnchor';
+    filePath: string;
+    anchorText: string;
+    position?: 'before' | 'after';
+    text: string;
+  }
+  | {
     kind: 'replaceRangeInFile';
     filePath: string;
     expectedOldText: string;
@@ -7615,6 +7622,123 @@ const Panel = () => {
         }
       };
 
+      // Phase 3-A: resolve a semantic placement ("insert after <anchor>") to an
+      // offset against the LIVE document, then reuse the proven anchored-insertion
+      // (insertAtCursor) path. This is cursor-free and robust: the extension —
+      // not the model — does the matching against the real file, so a short
+      // section-heading anchor is enough and there is no fragile large-chunk
+      // exact match. Stored as `insertAtCursor` so all card/overlay/accept logic
+      // is shared.
+      const captureAnchoredInsertionPatchMessage = async (patch: {
+        filePath: string;
+        anchorText: string;
+        position?: 'before' | 'after';
+        text: string;
+      }): Promise<StoredMessage> => {
+        const insertionText = patch.text;
+        try {
+          const projectId = getOverleafProjectIdFromPathname(
+            window.location.pathname
+          );
+          const bridge = window.ageafBridge;
+          if (!projectId || !bridge) {
+            throw new Error('Missing project or editor identity');
+          }
+          const filePath = canonicalFilePath(patch.filePath);
+          if (!filePath || !patch.anchorText) {
+            throw new Error('Missing target file or anchor for placement');
+          }
+          const target = await bridge.requestTargetFile({ projectId, filePath });
+          if (
+            !target?.ok ||
+            target.projectId !== projectId ||
+            canonicalFilePath(target.filePath) !== filePath ||
+            typeof target.content !== 'string'
+          ) {
+            throw new Error(
+              target?.error ?? 'Unable to open the target file for placement'
+            );
+          }
+          const content = target.content;
+          const firstIdx = content.indexOf(patch.anchorText);
+          if (firstIdx < 0) {
+            throw new Error(
+              'Could not locate the anchor text in the target file'
+            );
+          }
+          const secondIdx = content.indexOf(
+            patch.anchorText,
+            firstIdx + Math.max(1, patch.anchorText.length)
+          );
+          if (secondIdx >= 0) {
+            throw new Error(
+              'The anchor appears more than once; a more specific location is needed'
+            );
+          }
+          // Snap to a line boundary so "after" lands at the start of the line
+          // following the anchor, and "before" at the start of the anchor's line.
+          let offset: number;
+          if (patch.position === 'before') {
+            offset = content.lastIndexOf('\n', Math.max(0, firstIdx - 1)) + 1;
+          } else {
+            const anchorEnd = firstIdx + patch.anchorText.length;
+            const nextNewline = content.indexOf('\n', anchorEnd);
+            offset = nextNewline < 0 ? content.length : nextNewline + 1;
+          }
+          if (
+            getOverleafProjectIdFromPathname(window.location.pathname) !==
+            projectId
+          ) {
+            throw new Error('Proposal target identity changed during capture');
+          }
+          const proposal = await buildAnchoredInsertionProposal({
+            projectId,
+            filePath,
+            ...(target.fileId ? { fileId: target.fileId } : {}),
+            content,
+            offset,
+            insertionText,
+            idempotencySeed: `${sessionConversationId}:${jobId}:anchor:${patch.position ?? 'after'}:${patch.anchorText}`,
+            conversationId: sessionConversationId,
+            sourceJobId: jobId,
+            provenance: {
+              provider,
+              ...(currentModel ? { model: currentModel } : {}),
+              requestSummary: 'Insert proposed text at resolved anchor',
+              contextCategories: ['active-file', 'anchor', 'adjacent-anchors'],
+            },
+          });
+          const transaction = await transactionRpc<EditTransactionV1>(
+            'propose',
+            proposal
+          );
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'insertAtCursor',
+              text: insertionText,
+              status: 'pending',
+              transactionId: transaction.id,
+              transactionRevision: transaction.revision,
+              projectId: transaction.projectId,
+            },
+          };
+        } catch (error) {
+          return {
+            role: 'system',
+            content: '',
+            patchReview: {
+              kind: 'insertAtCursor',
+              text: insertionText,
+              status: 'pending',
+              transactionError:
+                error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      };
+
       const captureReplacementPatchMessage = async (
         patch:
           | { kind: 'replaceSelection'; text: string; snapshot: SelectionSnapshot }
@@ -8571,6 +8695,14 @@ const Panel = () => {
                 ...(typeof patch.lineFrom === 'number'
                   ? { lineFrom: patch.lineFrom }
                   : {}),
+              }).then(commitPatchReviewMessage);
+              return;
+            } else if (patch.kind === 'insertAtAnchor') {
+              void captureAnchoredInsertionPatchMessage({
+                filePath: patch.filePath,
+                anchorText: patch.anchorText,
+                ...(patch.position ? { position: patch.position } : {}),
+                text: patch.text,
               }).then(commitPatchReviewMessage);
               return;
             } else if (patch.kind === 'insertAtCursor') {

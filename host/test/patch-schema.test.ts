@@ -25,6 +25,56 @@ test('validatePatch accepts insertAtCursor', () => {
   assert.deepEqual(patch, { kind: 'insertAtCursor', text: 'hello' });
 });
 
+test('validatePatch accepts insertAtAnchor with position', () => {
+  const patch = validatePatch({
+    kind: 'insertAtAnchor',
+    filePath: 'main.tex',
+    anchorText: '\\section{Introduction}',
+    position: 'after',
+    text: '\n\n\\section{Methods}\n',
+  });
+  assert.deepEqual(patch, {
+    kind: 'insertAtAnchor',
+    filePath: 'main.tex',
+    anchorText: '\\section{Introduction}',
+    position: 'after',
+    text: '\n\n\\section{Methods}\n',
+  });
+});
+
+test('validatePatch defaults insertAtAnchor without an explicit position', () => {
+  const patch = validatePatch({
+    kind: 'insertAtAnchor',
+    filePath: 'main.tex',
+    anchorText: '\\section{Results}',
+    text: 'x',
+  });
+  assert.deepEqual(patch, {
+    kind: 'insertAtAnchor',
+    filePath: 'main.tex',
+    anchorText: '\\section{Results}',
+    text: 'x',
+  });
+});
+
+test('validatePatch rejects insertAtAnchor missing an anchor', () => {
+  assert.throws(
+    () =>
+      validatePatch({ kind: 'insertAtAnchor', filePath: 'main.tex', text: 'x' }),
+    /Invalid patch/
+  );
+  assert.throws(
+    () =>
+      validatePatch({
+        kind: 'insertAtAnchor',
+        filePath: 'main.tex',
+        anchorText: '',
+        text: 'x',
+      }),
+    /Invalid patch/
+  );
+});
+
 test('validatePatch preserves lineFrom for replaceRangeInFile patches', () => {
   const patch = validatePatch({
     kind: 'replaceRangeInFile',

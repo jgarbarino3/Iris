@@ -29,11 +29,13 @@ export const AUTOMATIC_PLACEMENT_GUIDANCE = [
   '  2. Get its EXACT current text: use an attached [Overleaf file: <path>] block if present; otherwise Read/Grep the on-disk project files (see "Project search") to find `Context.activeFile` and read it. The project snapshot on disk is the user\'s real document — do not treat its files as unrelated templates.',
   '  3. Choose a UNIQUE anchor snippet copied VERBATIM from that file next to the target spot — for example the \\section{...} heading you are inserting before/after, or a unique adjacent line. It must appear EXACTLY ONCE in the file.',
   '- Emit exactly one fenced `ageaf-patch` block containing ONLY:',
-  '  { "kind":"replaceRangeInFile", "filePath":"<target file>", "expectedOldText":"<the verbatim unique anchor>", "text":"<the same anchor with your new content inserted before/after it>" }',
-  '  - `expectedOldText` MUST be an exact substring of the current file (copy it character-for-character, including its full line) and MUST be unique.',
-  '  - `text` MUST equal `expectedOldText` with your new content inserted in the correct position, so the anchor itself is preserved and only your content is added (a clean, surgical insert).',
-  '  - Do NOT include `from`/`to`: targeting is by the unique anchor text.',
-  '- This OVERRIDES the "prefer a plain code block for new content" rule and the "use AGEAF_FILE_UPDATE when files are attached" rule: for placement/insertion intent, ALWAYS use this anchored `replaceRangeInFile` card so the user gets a surgical, approvable change.',
+  '  { "kind":"insertAtAnchor", "filePath":"<target file>", "anchorText":"<a short, unique line copied verbatim from the file>", "position":"after", "text":"<ONLY the new content to insert>" }',
+  '  - `anchorText` is a SHORT, unique landmark line copied verbatim from the current file — prefer a single `\\section{...}` / `\\subsection{...}` heading or one distinctive line next to the target spot. Keep it short (one line) so it matches exactly; do NOT paste a whole paragraph.',
+  '  - `position` is "after" to insert immediately after the anchor line, or "before" to insert immediately before it. For "put X after the introduction", anchor on the `\\section{Introduction}` heading (or the heading that follows the intro) and choose position accordingly.',
+  '  - `text` is ONLY the new content you are adding (do NOT repeat the anchor). Start it with a blank line and end with a blank line so it is cleanly separated (e.g. "\\n\\n\\section{Methods}\\n...\\n").',
+  '  - The extension resolves `anchorText` against the LIVE document and inserts your `text` at that spot, so you do NOT need offsets and do NOT need to reproduce large chunks of the file — just one exact short anchor line.',
+  '- This OVERRIDES the "prefer a plain code block for new content" rule and the "use AGEAF_FILE_UPDATE when files are attached" rule: for placement/insertion intent, ALWAYS use this `insertAtAnchor` card so the user gets a surgical, approvable, cursor-free insert.',
+  '- Emit ONLY this one placement patch. Do NOT also emit an `insertAtCursor` or `replaceRangeInFile` patch for the same request — one card only.',
   '- Keep the visible response to a one-line note of where you inserted it; put the content only inside the patch.',
 ].join('\n');
 

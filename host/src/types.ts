@@ -9,7 +9,14 @@ export type Patch =
     lineFrom?: number;
   }
   | { kind: 'replaceSelection'; text: string }
-  | { kind: 'insertAtCursor'; text: string };
+  | { kind: 'insertAtCursor'; text: string }
+  | {
+    kind: 'insertAtAnchor';
+    filePath: string;
+    anchorText: string;
+    position?: 'before' | 'after';
+    text: string;
+  };
 
 export type JobEvent = {
   event:

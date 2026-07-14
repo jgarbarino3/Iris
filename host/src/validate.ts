@@ -14,6 +14,25 @@ export function validatePatch(value: unknown): Patch {
     return { kind: patch.kind, text: patch.text } as Patch;
   }
 
+  if (patch.kind === 'insertAtAnchor') {
+    if (
+      typeof (patch as any).filePath !== 'string' ||
+      typeof (patch as any).anchorText !== 'string' ||
+      (patch as any).anchorText.length === 0 ||
+      typeof patch.text !== 'string'
+    ) {
+      throw new Error('Invalid patch');
+    }
+    const position = (patch as any).position;
+    return {
+      kind: 'insertAtAnchor',
+      filePath: (patch as any).filePath,
+      anchorText: (patch as any).anchorText,
+      text: patch.text,
+      ...(position === 'before' || position === 'after' ? { position } : {}),
+    };
+  }
+
   if (patch.kind === 'replaceRangeInFile') {
     if (
       typeof (patch as any).filePath !== 'string' ||

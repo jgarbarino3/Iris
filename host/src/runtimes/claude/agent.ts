@@ -69,6 +69,13 @@ const PatchSchema = z.union([
     kind: z.literal('insertAtCursor'),
     text: z.string(),
   }),
+  z.object({
+    kind: z.literal('insertAtAnchor'),
+    filePath: z.string(),
+    anchorText: z.string().min(1),
+    position: z.union([z.literal('before'), z.literal('after')]).optional(),
+    text: z.string(),
+  }),
   z
     .object({
       kind: z.literal('replaceRangeInFile'),
@@ -108,6 +115,18 @@ const PATCH_OUTPUT_FORMAT: OutputFormat = {
           text: { type: 'string' },
         },
         required: ['kind', 'text'],
+        additionalProperties: false,
+      },
+      {
+        type: 'object',
+        properties: {
+          kind: { const: 'insertAtAnchor' },
+          filePath: { type: 'string' },
+          anchorText: { type: 'string' },
+          position: { enum: ['before', 'after'] },
+          text: { type: 'string' },
+        },
+        required: ['kind', 'filePath', 'anchorText', 'text'],
         additionalProperties: false,
       },
       {
