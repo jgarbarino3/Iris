@@ -333,6 +333,20 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 - P2-07 automated verification passed; live authenticated Overleaf smoke remains unproven.
 - P2-07 is verified; P2-08 is active but was not implemented. Phase 2 is not complete.
 
+### P2-08 — Displaced-path deletion and global cutover static audit
+
+- Deleted the last displaced direct writer `src/main/eventHandlers.ts` (moved to macOS Trash). It contained the legacy `applyReplacementAtRange`/`onReplaceContent` pair, which performed a direct content-modifying `view.dispatch({ changes })` outside the acknowledged batch bridge. It was already orphaned: no production module, webpack entry, or test imported it, and typecheck, root tests, and the production build stay green after removal.
+- The static audit proves no displaced direct mutation paths exist outside `executeEditBatch`. `test/p2-08-cutover-contract.test.cjs` enumerates every non-test `.ts`/`.tsx` under `src/main` and `src/iso`, extracts each `.dispatch(` call argument by balanced-bracket matching (handling multi-line specs), and asserts that no file other than `src/main/editorBridge/bridge.ts` passes a `changes:` document mutation. Effect-only decoration/overlay dispatches (`src/main/citationIndicator.ts`, `src/main/inlineDiffOverlay.ts`) carry only `effects:` and mutate no document text, so they pass the audit.
+- The audit further asserts the bridge exposes exactly one content-modifying dispatch and that it is lexically owned by `executeEditBatch` (no other function is declared between `async function executeEditBatch` and the mutating `view.dispatch`), and that no source references the deleted `applyReplacementAtRange`/`onReplaceContent` symbols.
+- The centralized `src/iso/editorAdapter.ts` `EditorAdapter` contains only `applyEditBatch` as a document-content mutation method. Its other methods (`requestSelection`, `captureInsertionTarget`, `requestFileContent`, `requestTargetFile`, `navigateToFile`, `undoEditor`, `redoEditor`, `isMutationReady`) read state, navigate, or invoke CodeMirror's native `undo`/`redo` history commands; `undoEditor`/`redoEditor` are not referenced by any panel/review accept or revert path, so the "no review undo/redo refs" cutover gate holds and the durable inverse transaction remains the only review-driven reversal path.
+- Focused P2-08 static command: `node --test test/p2-08-cutover-contract.test.cjs` — 3 passed, 0 failed.
+- Root `npm run typecheck` — passed.
+- Root `npm test` — 428 CommonJS tests plus 132 TypeScript transaction/storage tests passed, 0 failed (560 total).
+- Root `npm run build` — passed; Webpack compiled the production extension and the generated skills manifest remained unchanged.
+- `npx playwright test --workers=1 --retries=0` — 18 passed, 0 failed.
+- `npm --prefix host test` — 318 passed, 0 failed.
+- P2-08 automated verification passed. The P2-09 private live authenticated Overleaf smoke test is a manual target-perspective step and has **not** been executed in this recovery; it remains pending and must be run live before Phase 2 final acceptance.
+
 ## Final acceptance
 
-Pending P2-08 final global cutover/displaced-path closure, P2-09 authenticated private Overleaf smoke, correctness review, maintainability review, and final diff review. Phase 2 is not complete.
+Pending P2-09 authenticated private Overleaf smoke, correctness review, maintainability review, and final diff review. P2-08 displaced-path closure is complete and verified; the live authenticated Overleaf smoke has not yet been run. Phase 2 is not complete.

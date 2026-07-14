@@ -4,11 +4,11 @@
 
 **Goal:** Active
 
-**Branch:** `codex/iris-phases-0-2`
+**Branch:** `feature/glassmorphic-ui` (recovered from `codex/iris-phases-0-2` at `024dc3c`)
 
 **Phase:** 2
 
-**Active issue:** P2-08
+**Active issue:** P2-09
 
 ## Current state
 
@@ -64,7 +64,8 @@
 - Project history export is a deterministic versioned allowlist with project-relative targets, expected/old/new text, hashes, sanitized receipts, stable failure codes, bounded journal events, and original/successor/inverse/recovery relationships. It recursively removes sentinel secrets, credentials, tokens, authorization/cookie headers, environment-like values, absolute paths, raw provider prompts/responses, host configuration, and unrelated browser storage.
 - Terminal-history retention is one explicit project-scoped atomic repository operation using injected time. It retains exactly the 90-day boundary and at most 1,000 terminal transactions, prunes oldest eligible relationship groups first with transaction-ID tie-breaking, and preserves nonterminal/conflicted/recovery-required/unresolved inverse records, unresolved recovery evidence, surviving journal/operation material, cross-project records, and referential integrity across original/successor/inverse chains. Repeated and interrupted pruning is deterministic, idempotent, and restart-safe without an IndexedDB schema change.
 - P2-07 automated verification passed; live authenticated Overleaf smoke remains unproven.
-- P2-08 is active but not implemented. Trusted auto-apply, compile/PDF validation, final global cutover, authenticated P2-09 acceptance, and public distribution remain out of scope.
+- P2-08 is verified. The uncommitted P2-08 work was lost to a `git reset --hard` and was re-implemented from the clean `024dc3c` (P2-07) baseline. The last displaced direct writer `src/main/eventHandlers.ts` was deleted (moved to macOS Trash); it was already orphaned (no import, webpack entry, or test referenced it). A new static displaced-path audit `test/p2-08-cutover-contract.test.cjs` proves that `executeEditBatch` in `src/main/editorBridge/bridge.ts` is the only production content-modifying CodeMirror dispatch, that every other `src/main`/`src/iso` `.dispatch` is effect-only (decorations/overlay widgets), and that the centralized `EditorAdapter` mutates document content solely through `applyEditBatch`. Automated verification passed: root typecheck, 560 root tests (428 CommonJS + 132 transaction), 318 host tests, production build, and 18 deterministic Playwright browser tests. Trusted auto-apply, compile/PDF validation, and public distribution remain out of scope.
+- P2-09 is active. The full automated matrix passes; the only open Phase 2 gate is the private live authenticated Overleaf smoke test, which has **not** been run and must be executed live before final acceptance. No P2-09 live smoke result has been fabricated.
 - The production build initially stalled on the generated iCloud-dataless `node_modules/picomatch/lib/constants.js`; generated `node_modules` was moved to Trash and restored with `npm ci`, after which build and browser gates passed.
 - `npm run verify` remains blocked only when `npm --prefix host run verify` reaches its formatter glob and inspects the preserved protected untracked file `host/src/auth/pairing 2.ts`. The host format check identifies only that file; it was not edited or formatted. Root format/typecheck/test/build, host typecheck/test/build, deterministic Playwright, and `git diff --check` pass independently.
 - Automated P2-02 verification passed; live authenticated Overleaf smoke remains unproven.
@@ -74,7 +75,7 @@
 
 ## Next gate
 
-P2-08 is active after P2-07 automated verification. Perform only the final displaced-path/global-cutover audit next; do not implement P2-09, trusted auto-apply, or compile/PDF validation. P2-07 automated verification passed; live authenticated Overleaf smoke remains unproven. The aggregate verifier should be rerun from a clean checkout when the protected external host file is absent.
+P2-09 is active after P2-08 automated verification. The remaining work is the private live authenticated Overleaf smoke test on a real `Iris Smoke Test` project with `iris-smoke.tex`, proving the complete mutation lifecycle (propose → review → acknowledged apply → durable revert) against a live host. Do not implement trusted auto-apply or compile/PDF validation (Phase 3). The aggregate `npm run verify` should be rerun from a clean checkout when the protected external host file `host/src/auth/pairing 2.ts` is absent, since the host formatter glob stops on it.
 
 ## Stop states
 
