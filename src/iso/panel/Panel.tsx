@@ -146,6 +146,25 @@ const EDITOR_OVERLAY_CLEAR_EVENT = 'ageaf:editor:overlay:clear';
 const EDITOR_OVERLAY_READY_EVENT = 'ageaf:editor:overlay:ready';
 const PANEL_OVERLAY_ACTION_EVENT = 'ageaf:panel:patch-review-action';
 
+/**
+ * Best-effort teardown of the in-editor inline overlay for one transaction.
+ * Fired on a successful accept/reject so the widget disappears immediately,
+ * rather than depending on the pending-overlay diff effect (which was leaving
+ * the overlay on screen after a single successful apply).
+ */
+function dismissOverlayForTransaction(transactionId?: string | null): void {
+  if (!transactionId) return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(EDITOR_OVERLAY_CLEAR_EVENT, {
+        detail: { transactionId: String(transactionId) },
+      })
+    );
+  } catch {
+    // UI cleanup is best-effort; never block the accept/reject result on it.
+  }
+}
+
 async function transactionRpc<T = EditTransactionV1>(
   action: TransactionRuntimeActionV1,
   payload: unknown
@@ -7289,8 +7308,18 @@ const Panel = () => {
         return results;
       })();
 
+      // Phase 3-A: tell the model which Overleaf file is currently open so it
+      // can auto-target placement/edits without a selection or an explicit path.
+      const activeFileNameForContext = getActiveFilename();
+      const activeFileIdForContext = getActiveFileId();
       const sharedContext = {
         ...contextPayload,
+        ...(activeFileNameForContext
+          ? { activeFile: activeFileNameForContext }
+          : {}),
+        ...(activeFileIdForContext
+          ? { activeFileId: activeFileIdForContext }
+          : {}),
         ...(messageImages
           ? {
             images: messageImages.map((image) => ({
@@ -9632,6 +9661,7 @@ const Panel = () => {
     const prevStatus = ((patchReview as any).status ??
       'pending') as PatchReviewStatus;
     if (prevStatus !== 'pending') return;
+    const originalTransactionId = patchReview.transactionId;
     setPatchActionBusyId(messageId);
     try {
       const transaction = await rejectDurableReviewTransaction(patchReview);
@@ -9650,6 +9680,9 @@ const Panel = () => {
           transactionError: undefined,
         };
       });
+      // Tear down the inline overlay on reject too (cover successor ids).
+      dismissOverlayForTransaction(originalTransactionId);
+      dismissOverlayForTransaction(transaction.id);
     } catch (error) {
       setPatchActionErrors((previous) => ({
         ...previous,
@@ -9948,6 +9981,11 @@ const Panel = () => {
             text: entry.nextText,
           }));
           clearPatchErrorForMessage(entry.messageId);
+          // Explicitly tear down the inline overlay for the applied transaction.
+          // The [messages] effect *should* clear it via the pending-diff, but on a
+          // successful single apply the widget was lingering, leaving the card
+          // read-only and un-actionable. Clear it directly on success.
+          dismissOverlayForTransaction(entry.transaction.id);
         }
         for (const relationship of completedRevertRelationships) {
           projectRevertRelationship(relationship, operation);
