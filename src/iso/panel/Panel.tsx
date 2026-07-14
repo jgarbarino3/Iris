@@ -7315,9 +7315,45 @@ const Panel = () => {
         return results;
       })();
 
-      // Phase 3-A: tell the model which Overleaf file is currently open so it
-      // can auto-target placement/edits without a selection or an explicit path.
-      const activeFileNameForContext = getActiveFilename();
+      // Phase 3-A: reliably provide the active file via the editor bridge.
+      // The HTTP project-file fetch above and the DOM tab-name read below both
+      // fail silently on some Overleaf layouts, leaving the model with no
+      // document to anchor against (it then asks the user to attach the file).
+      // The bridge is the same channel cursor insertion already uses, so it is
+      // the dependable source for both the active-file identity and its content.
+      let activeFileFromBridge: { path: string; content: string } | null = null;
+      try {
+        const bridge = window.ageafBridge;
+        if (bridge) {
+          const target = await bridge.captureInsertionTarget();
+          if (
+            target?.ok &&
+            typeof target.content === 'string' &&
+            typeof target.filePath === 'string' &&
+            target.filePath
+          ) {
+            activeFileFromBridge = {
+              path: canonicalFilePath(target.filePath),
+              content: target.content,
+            };
+          }
+        }
+      } catch {
+        /* bridge unavailable; fall back to HTTP/DOM-provided context */
+      }
+
+      // Ensure the active file is on disk for the model (deduped by path).
+      const projectFilesForModel =
+        activeFileFromBridge &&
+        !projectFilesForContext.some(
+          (f) => f.path === activeFileFromBridge!.path
+        )
+          ? [activeFileFromBridge, ...projectFilesForContext]
+          : projectFilesForContext;
+
+      // Prefer the bridge-derived active file path; fall back to the DOM read.
+      const activeFileNameForContext =
+        activeFileFromBridge?.path ?? getActiveFilename();
       const activeFileIdForContext = getActiveFileId();
       const sharedContext = {
         ...contextPayload,
@@ -7399,7 +7435,8 @@ const Panel = () => {
                 maxFiles: 1,
               },
               userSettings: sharedUserSettings,
-              ...(projectFilesForContext.length > 0 ? { projectFiles: projectFilesForContext } : {}),
+              ...(projectFilesForModel.length > 0
+                ? { projectFiles: projectFilesForModel } : {}),
             }
           : provider === 'codex'
           ? {
@@ -7421,8 +7458,8 @@ const Panel = () => {
                 maxFiles: 1,
               },
               userSettings: sharedUserSettings,
-              ...(projectFilesForContext.length > 0
-                ? { projectFiles: projectFilesForContext }
+              ...(projectFilesForModel.length > 0
+                ? { projectFiles: projectFilesForModel }
                 : {}),
             }
           : {
@@ -7449,8 +7486,8 @@ const Panel = () => {
                 enableCommandBlocklist: options.enableCommandBlocklist,
                 blockedCommandsUnix: options.blockedCommandsUnix,
               },
-              ...(projectFilesForContext.length > 0
-                ? { projectFiles: projectFilesForContext }
+              ...(projectFilesForModel.length > 0
+                ? { projectFiles: projectFilesForModel }
                 : {}),
             };
 
