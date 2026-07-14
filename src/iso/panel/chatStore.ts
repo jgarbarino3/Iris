@@ -1,4 +1,9 @@
-import type { ConflictPreviewV1 } from '../../transactions/contracts';
+import type {
+  ConflictPreviewV1,
+  EditOperationStateV1,
+  EditProvenanceV1,
+  EditTransactionState,
+} from '../../transactions/contracts';
 
 export type ProviderId = 'claude' | 'codex' | 'pi';
 
@@ -58,60 +63,133 @@ export type StoredPatchReviewOutcome =
   | 'compensated-failure'
   | 'recovery-required';
 
-export type StoredPatchReview =
-  | {
-      kind: 'replaceSelection';
-      selection: string;
-      from: number;
-      to: number;
-      lineFrom?: number;
-      lineTo?: number;
-      text: string;
-      status?: StoredPatchReviewStatus;
-      fileName?: string;
-      hasAnimated?: boolean;
-      transactionId?: string;
-      transactionRevision?: number;
-      projectId?: string;
-      transactionError?: string;
-      transactionOutcome?: StoredPatchReviewOutcome;
-      operationId?: string;
-      conflictPreview?: ConflictPreviewV1;
-      successorTransactionId?: string;
-    }
-  | {
-      kind: 'insertAtCursor';
-      text: string;
-      status?: StoredPatchReviewStatus;
-      hasAnimated?: boolean;
-      transactionId?: string;
-      transactionRevision?: number;
-      projectId?: string;
-      transactionError?: string;
-      transactionOutcome?: StoredPatchReviewOutcome;
-      operationId?: string;
-      conflictPreview?: ConflictPreviewV1;
-      successorTransactionId?: string;
-    }
-  | {
-      kind: 'replaceRangeInFile';
-      filePath: string;
-      expectedOldText: string;
-      text: string;
-      from?: number;
-      to?: number;
-      lineFrom?: number;
-      status?: StoredPatchReviewStatus;
-      hasAnimated?: boolean;
-      transactionId?: string;
-      transactionRevision?: number;
-      projectId?: string;
-      transactionError?: string;
-      transactionOutcome?: StoredPatchReviewOutcome;
-      operationId?: string;
-      conflictPreview?: ConflictPreviewV1;
-      successorTransactionId?: string;
-    };
+export type LegacyReviewMigrationReasonV1 =
+  | 'LEGACY_INSERT_REQUIRES_RETARGET'
+  | 'LEGACY_PROJECT_UNPROVEN'
+  | 'LEGACY_FILE_UNPROVEN'
+  | 'LEGACY_RANGE_UNPROVEN'
+  | 'LEGACY_TEXT_UNPROVEN'
+  | 'LEGACY_HASH_UNPROVEN'
+  | 'LEGACY_ANCHORS_UNPROVEN'
+  | 'LEGACY_PROPOSAL_ORDER_UNPROVEN'
+  | 'LEGACY_PROVENANCE_UNPROVEN'
+  | 'LEGACY_RECORD_MALFORMED'
+  | 'LEGACY_ACCEPTED_UNVERIFIED'
+  | 'LEGACY_REJECTED_HISTORY'
+  | 'TRANSACTION_MISSING'
+  | 'SUCCESSOR_MISSING'
+  | 'APPLIED_RECEIPT_MISSING';
+
+export type LegacyReplacementMigrationV1 = {
+  schemaVersion: 1;
+  projectId: string;
+  filePath: string;
+  fileId?: string;
+  from: number;
+  to: number;
+  expectedText: string;
+  replacementText: string;
+  baseContentSha256: string;
+  prefix: string;
+  suffix: string;
+  proposalOrder: number;
+  provenance?: EditProvenanceV1;
+  sourceJobId?: string;
+};
+
+export type StoredReviewProjectionV1 = {
+  schemaVersion: 1;
+  key: string;
+  mode:
+    | 'transaction-backed'
+    | 'retarget-required'
+    | 'historical-unverified'
+    | 'migration-error';
+  readOnly: boolean;
+  reasonCode?: LegacyReviewMigrationReasonV1;
+  transactionState?: EditTransactionState;
+  operationState?: EditOperationStateV1;
+};
+
+type StoredPatchReviewProjectionFields = {
+  projection?: StoredReviewProjectionV1;
+  legacyMigration?: LegacyReplacementMigrationV1;
+};
+
+export type StoredPatchReview = StoredPatchReviewProjectionFields &
+  (
+    | {
+        kind: 'replaceSelection';
+        selection: string;
+        from: number;
+        to: number;
+        lineFrom?: number;
+        lineTo?: number;
+        text: string;
+        status?: StoredPatchReviewStatus;
+        fileName?: string;
+        fileId?: string;
+        hasAnimated?: boolean;
+        transactionId?: string;
+        transactionRevision?: number;
+        projectId?: string;
+        transactionError?: string;
+        transactionOutcome?: StoredPatchReviewOutcome;
+        operationId?: string;
+        conflictPreview?: ConflictPreviewV1;
+        successorTransactionId?: string;
+      }
+    | {
+        kind: 'insertAtCursor';
+        text: string;
+        filePath?: string;
+        fileId?: string;
+        from?: number;
+        to?: number;
+        status?: StoredPatchReviewStatus;
+        hasAnimated?: boolean;
+        transactionId?: string;
+        transactionRevision?: number;
+        projectId?: string;
+        transactionError?: string;
+        transactionOutcome?: StoredPatchReviewOutcome;
+        operationId?: string;
+        conflictPreview?: ConflictPreviewV1;
+        successorTransactionId?: string;
+      }
+    | {
+        kind: 'replaceRangeInFile';
+        filePath: string;
+        fileId?: string;
+        expectedOldText: string;
+        text: string;
+        from?: number;
+        to?: number;
+        lineFrom?: number;
+        status?: StoredPatchReviewStatus;
+        hasAnimated?: boolean;
+        transactionId?: string;
+        transactionRevision?: number;
+        projectId?: string;
+        transactionError?: string;
+        transactionOutcome?: StoredPatchReviewOutcome;
+        operationId?: string;
+        conflictPreview?: ConflictPreviewV1;
+        successorTransactionId?: string;
+      }
+  );
+
+export type StoredTransactionReference = {
+  kind: 'transactionReference';
+  reviewKind: 'replaceSelection' | 'replaceRangeInFile' | 'insertAtCursor';
+  transactionId: string;
+  projectId: string;
+  projection: StoredReviewProjectionV1;
+};
+
+export type StoredPatchReviewRecord =
+  | StoredPatchReview
+  | StoredTransactionReference;
 
 export type StoredMessage = {
   role: 'system' | 'assistant' | 'user';
@@ -362,7 +440,7 @@ function normalizeStoredMessage(raw: any): StoredMessage | null {
       ): entry is StoredDocumentAttachment => Boolean(entry)
     );
 
-  const patchReview = normalizeStoredPatchReview(
+  const patchReview = normalizeStoredPatchReviewRecord(
     raw.patchReview ?? raw.patch_review
   );
   return {
@@ -375,7 +453,7 @@ function normalizeStoredMessage(raw: any): StoredMessage | null {
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(documents.length > 0 ? { documents } : {}),
     ...(patchReview ? { patchReview } : {}),
-  };
+  } as StoredMessage;
 }
 
 function normalizePatchReviewStatus(
@@ -452,6 +530,130 @@ function normalizeConflictPreview(raw: any): ConflictPreviewV1 | undefined {
   } as ConflictPreviewV1;
 }
 
+function normalizeReviewProjection(
+  raw: any
+): StoredReviewProjectionV1 | undefined {
+  if (!raw || typeof raw !== 'object' || raw.schemaVersion !== 1) {
+    return undefined;
+  }
+  if (
+    typeof raw.key !== 'string' ||
+    ![
+      'transaction-backed',
+      'retarget-required',
+      'historical-unverified',
+      'migration-error',
+    ].includes(raw.mode) ||
+    typeof raw.readOnly !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    schemaVersion: 1,
+    key: raw.key,
+    mode: raw.mode,
+    readOnly: raw.readOnly,
+    ...(typeof raw.reasonCode === 'string'
+      ? { reasonCode: raw.reasonCode as LegacyReviewMigrationReasonV1 }
+      : {}),
+    ...(typeof raw.transactionState === 'string'
+      ? { transactionState: raw.transactionState as EditTransactionState }
+      : {}),
+    ...(typeof raw.operationState === 'string'
+      ? { operationState: raw.operationState as EditOperationStateV1 }
+      : {}),
+  };
+}
+
+function normalizeLegacyMigration(
+  raw: any
+): LegacyReplacementMigrationV1 | undefined {
+  if (!raw || typeof raw !== 'object' || raw.schemaVersion !== 1) {
+    return undefined;
+  }
+  if (
+    typeof raw.projectId !== 'string' ||
+    typeof raw.filePath !== 'string' ||
+    !Number.isInteger(raw.from) ||
+    !Number.isInteger(raw.to) ||
+    typeof raw.expectedText !== 'string' ||
+    typeof raw.replacementText !== 'string' ||
+    typeof raw.baseContentSha256 !== 'string' ||
+    typeof raw.prefix !== 'string' ||
+    typeof raw.suffix !== 'string' ||
+    !Number.isInteger(raw.proposalOrder)
+  ) {
+    return undefined;
+  }
+  const provenance = raw.provenance;
+  return {
+    schemaVersion: 1,
+    projectId: raw.projectId,
+    filePath: raw.filePath,
+    ...(typeof raw.fileId === 'string' ? { fileId: raw.fileId } : {}),
+    from: raw.from,
+    to: raw.to,
+    expectedText: raw.expectedText,
+    replacementText: raw.replacementText,
+    baseContentSha256: raw.baseContentSha256,
+    prefix: raw.prefix,
+    suffix: raw.suffix,
+    proposalOrder: raw.proposalOrder,
+    ...(provenance && typeof provenance === 'object'
+      ? { provenance: provenance as EditProvenanceV1 }
+      : {}),
+    ...(typeof raw.sourceJobId === 'string'
+      ? { sourceJobId: raw.sourceJobId }
+      : {}),
+  };
+}
+
+function normalizeStoredPatchReviewRecord(
+  raw: any
+): StoredPatchReviewRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.kind === 'transactionReference') {
+    const projection = normalizeReviewProjection(raw.projection);
+    if (
+      (raw.reviewKind === 'replaceSelection' ||
+        raw.reviewKind === 'replaceRangeInFile' ||
+        raw.reviewKind === 'insertAtCursor') &&
+      typeof raw.transactionId === 'string' &&
+      typeof raw.projectId === 'string' &&
+      projection
+    ) {
+      return {
+        kind: 'transactionReference',
+        reviewKind: raw.reviewKind,
+        transactionId: raw.transactionId,
+        projectId: raw.projectId,
+        projection,
+      };
+    }
+  }
+  const normalized = normalizeStoredPatchReview(raw);
+  if (normalized) return normalized;
+  const status = normalizePatchReviewStatus(raw.status) ?? 'pending';
+  return {
+    kind: 'insertAtCursor',
+    text: 'Legacy review data is unavailable.',
+    status,
+    projection: {
+      schemaVersion: 1,
+      key: 'legacy:malformed',
+      mode:
+        status === 'pending' ? 'retarget-required' : 'historical-unverified',
+      readOnly: true,
+      reasonCode:
+        status === 'accepted'
+          ? 'LEGACY_ACCEPTED_UNVERIFIED'
+          : status === 'rejected'
+          ? 'LEGACY_REJECTED_HISTORY'
+          : 'LEGACY_RECORD_MALFORMED',
+    },
+  };
+}
+
 function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
   if (!raw || typeof raw !== 'object') return null;
   const kind = raw.kind;
@@ -460,6 +662,10 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
     raw.transactionOutcome
   );
   const conflictPreview = normalizeConflictPreview(raw.conflictPreview);
+  const projection = normalizeReviewProjection(raw.projection);
+  const legacyMigration = normalizeLegacyMigration(
+    raw.legacyMigration ?? raw.legacy_migration
+  );
   const hasAnimatedRaw = raw.hasAnimated ?? raw.has_animated;
   const hasAnimated =
     typeof hasAnimatedRaw === 'boolean' ? hasAnimatedRaw : undefined;
@@ -510,6 +716,7 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       text,
       ...(status ? { status } : {}),
       ...(fileName ? { fileName } : {}),
+      ...(typeof raw.fileId === 'string' ? { fileId: raw.fileId } : {}),
       ...(hasAnimated ? { hasAnimated } : {}),
       ...(typeof raw.transactionId === 'string'
         ? { transactionId: raw.transactionId }
@@ -531,15 +738,23 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
         : {}),
+      ...(projection ? { projection } : {}),
+      ...(legacyMigration ? { legacyMigration } : {}),
     };
   }
 
   if (kind === 'insertAtCursor') {
     const text = typeof raw.text === 'string' ? raw.text : null;
     if (!text) return null;
+    const from = Number.isInteger(raw.from) ? Number(raw.from) : undefined;
+    const to = Number.isInteger(raw.to) ? Number(raw.to) : undefined;
     return {
       kind,
       text,
+      ...(typeof raw.filePath === 'string' ? { filePath: raw.filePath } : {}),
+      ...(typeof raw.fileId === 'string' ? { fileId: raw.fileId } : {}),
+      ...(from !== undefined ? { from } : {}),
+      ...(to !== undefined ? { to } : {}),
       ...(status ? { status } : {}),
       ...(hasAnimated ? { hasAnimated } : {}),
       ...(typeof raw.transactionId === 'string'
@@ -562,6 +777,8 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
         : {}),
+      ...(projection ? { projection } : {}),
+      ...(legacyMigration ? { legacyMigration } : {}),
     };
   }
 
@@ -593,6 +810,7 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
     return {
       kind,
       filePath,
+      ...(typeof raw.fileId === 'string' ? { fileId: raw.fileId } : {}),
       expectedOldText,
       text,
       ...(typeof from === 'number' ? { from } : {}),
@@ -619,6 +837,8 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
         : {}),
+      ...(projection ? { projection } : {}),
+      ...(legacyMigration ? { legacyMigration } : {}),
     };
   }
 

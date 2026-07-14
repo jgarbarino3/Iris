@@ -1,6 +1,6 @@
 # Iris Phases 0–2 State
 
-**Updated:** 2026-07-13
+**Updated:** 2026-07-14
 
 **Goal:** Active
 
@@ -8,7 +8,7 @@
 
 **Phase:** 2
 
-**Active issue:** P2-06
+**Active issue:** P2-07
 
 ## Current state
 
@@ -19,7 +19,7 @@
 - P1-02 is verified: GitHub Actions now performs clean root/host installs and runs one `npm run verify` entry point with formatting, type checking, unit tests, production builds, and the deterministic Playwright browser smoke.
 - Playwright `1.61.1` is pinned; the MV3 fixture loads the unpacked production build in bundled Chromium, routes an Overleaf project URL to a deterministic page, verifies the Ageaf service worker, panel injection, layout wrapping, and zero page errors.
 - The browser gate caught Webpack automatic public-path inference failing in a content script; `config/webpack.common.js` now defers chunk ownership to the existing `chrome.runtime.getURL` helper and the regression is covered by both Node and browser tests.
-- The current implementation passes 408 CommonJS root tests, 59 TypeScript transaction/storage tests, root format/typecheck/build, 318 host tests plus host typecheck/build, and 14 deterministic one-worker/zero-retry Playwright tests. The local aggregate verifier is blocked only by the preserved untracked user file `host/src/auth/pairing 2.ts`; remote CI does not include that file.
+- The current implementation passes 413 CommonJS root tests, 78 TypeScript transaction/storage tests, root format/typecheck/build, 318 host tests plus host typecheck/build, and 15 deterministic one-worker/zero-retry Playwright tests. The local aggregate verifier is blocked only by the preserved untracked user file `host/src/auth/pairing 2.ts`; remote CI does not include that file.
 - A0 is verified and the pushed GitHub Actions Verify run completed successfully: the concurrent Claude compaction test uses an injected synchronization barrier instead of depending on CLI availability or timing.
 - P1-03 is verified: a versioned read-only diagnostic report is shared through HTTP/native transports, the host Doctor CLI and route expose host/runtime/loopback checks, the panel augments them with browser/project/file/bridge/editor checks, and repair remains explicit guidance rather than an automatic action.
 - P1-04 is verified: development HTTP is loopback-only, pairing codes are short-lived and attempt-bounded, bearer tokens are hashed in a mode-0600 credential file and bound to the current extension instance, every protected HTTP request and stream requires the token plus extension identity, and `auth:reset` revokes a running host through disk-backed state.
@@ -50,6 +50,11 @@
 - Supersede is one IndexedDB transaction across the original, successor, idempotency record, and both journal relationship events. The successor records `supersedesTransactionId`; the terminal original records `supersededByTransactionId`. Duplicate commands and concurrent compare-and-swap races converge on one authoritative successor. Public proposal payloads cannot preseed supersede links, and superseded transactions cannot preflight, apply, enter a P2-04 selection, or be rejected as pending history.
 - P2-04 batch preflight now persists durable conflict previews before failing the operation with zero dispatches. Conflicted transactions cannot use the legacy retry transition. Current chat cards and inline overlays remain projections/commands, follow the authoritative successor after reload for insertion and replacement cards, exclude conflicts from bulk/file acceptance, and display `accepted` only when the successor is `applied` with a persisted successful receipt.
 - Deterministic browser proof covers repeated-text ambiguity with zero mutations, a uniquely moved replacement anchor producing a pending successor with zero rebase dispatches, later explicit acceptance producing exactly one acknowledged mutation, explicit retarget and identity-change failure, successor/original reconstruction after reload, superseded-original application denial, and `docEpoch` changes that trigger inspection without authorizing application.
+- P2-06 is verified. A versioned pure classifier migrates only pending legacy replacements whose persisted proposal-time record proves the exact project, canonical project-relative file and recorded file ID, exact range and expected/replacement text, base SHA-256, bounded prefix/suffix anchors, proposal order, and allowlisted redacted provenance. Its deterministic project-scoped idempotency key makes panel reload, service-worker restart, duplicate messages, repeated attempts, and concurrent migration converge on one durable background transaction.
+- Legacy cursor insertions, incomplete or malformed replacement records, unproven project/file/range/text/hash/anchor/provenance records, missing or invalid successor chains, and irrecoverable transaction references remain read-only `retarget-required` history. Legacy accepted and rejected flags remain historical/unverified; an old accepted flag is never converted into `applied` without a persisted successful editor receipt. Migration and reconstruction never consult the active project, file, cursor, selection, or current document content.
+- Panel startup reconciles and lists authoritative background transactions for the recorded project, follows a valid durable successor chain, deduplicates by transaction ID, reconstructs missing insertion/replacement cards, refreshes stale cards, restores conflict previews and the latest recovery-required operation/export action, and preserves failed, rejected, conflicted, superseded, and recovery-required outcomes. Chat storage compacts transaction-backed cards to reference-only records; cards are reconstructed from durable transaction data rather than a panel-owned edit ledger.
+- Inline overlays are ephemeral, transaction-keyed projections. They retain no authoritative state, persist no proposal payload, infer no success, resolve no anchors, and perform no mutation. Overlay restoration now comes from startup transaction projections; current-cursor fallback, fuzzy/first-occurrence/trimmed/normalized matching, selection-clearing dispatch, and active-file line-number backfill were removed. Exact recorded file/range/text validation fails closed and repeated reloads create no duplicate overlay.
+- The new production unpacked-extension fixture seeds safe and unsafe legacy storage, proves one durable migrated transaction plus read-only history, reloads without duplicate cards/overlays or editor dispatch, and shows accepted only after an explicit apply produces a persisted acknowledged receipt. P2-07 is active; no inverse transaction, recent-history, retention, trusted auto-apply, compile/PDF validation, or other P2-07 behavior was added.
 - The production build initially stalled on the generated iCloud-dataless `node_modules/picomatch/lib/constants.js`; generated `node_modules` was moved to Trash and restored with `npm ci`, after which build and browser gates passed.
 - `npm run verify` remains blocked only when `npm --prefix host run verify` reaches its formatter glob and inspects the preserved protected untracked file `host/src/auth/pairing 2.ts`. The host format check identifies only that file; it was not edited or formatted. Root format/typecheck/test/build, host typecheck/test/build, deterministic Playwright, and `git diff --check` pass independently.
 - Automated P2-02 verification passed; live authenticated Overleaf smoke remains unproven.
@@ -59,7 +64,7 @@
 
 ## Next gate
 
-P2-06 is active and was not implemented in the P2-05 slice. Implement only the broad legacy pending-card migration and general startup projection reconstruction next. Run the aggregate verifier from a clean checkout when the protected external host file is absent, and complete authenticated Overleaf smoke evidence separately.
+P2-07 is active. Implement only durable inverse transactions, recent history, retention, and safe revert next. P2-06 automated verification passed; live authenticated Overleaf smoke remains unproven. The aggregate verifier should be rerun from a clean checkout when the protected external host file is absent.
 
 ## Stop states
 

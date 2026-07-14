@@ -1,5 +1,4 @@
 import { getCmView } from './helpers';
-import { LOCAL_STORAGE_KEY_INLINE_OVERLAY } from '../constants';
 
 const OVERLAY_SHOW_EVENT = 'ageaf:editor:overlay:show';
 const OVERLAY_CLEAR_EVENT = 'ageaf:editor:overlay:clear';
@@ -17,6 +16,7 @@ type OverlayConflict = {
 
 type OverlayPayload = {
   messageId: string;
+  transactionId: string;
   kind: OverlayKind;
   filePath?: string;
   fileName?: string;
@@ -66,6 +66,7 @@ let lastInstallAttemptAt = 0;
 let overlayGuardExtension: any = null;
 
 type ResolvedOverlay = {
+  transactionId: string;
   messageId: string;
   payload: OverlayPayload;
   range: OverlayRange;
@@ -106,7 +107,12 @@ let reviewBarItems: Array<{
 let reviewBarFileKey: string | null = null;
 let reviewBarFocusedByFile: Map<string, string> = new Map();
 let bulkActionInProgress = false;
-let lastSelectionClearVersion = -1;
+
+function hasOverlayMessageId(messageId: string): boolean {
+  return [...overlayById.values()].some(
+    (payload) => payload.messageId === messageId
+  );
+}
 
 function isDebugEnabled() {
   try {
@@ -132,16 +138,6 @@ function safeGetCmView(): ReturnType<typeof getCmView> | null {
   } catch {
     return null;
   }
-}
-
-function getProjectIdFromPathname(pathname: string) {
-  const segments = pathname.split('/').filter(Boolean);
-  if (segments[0] !== 'project') return null;
-  return segments[1] || null;
-}
-
-function getCurrentProjectId() {
-  return getProjectIdFromPathname(window.location.pathname);
 }
 
 const STYLE_VERSION = '4';
@@ -629,7 +625,7 @@ function ensureReviewBar() {
     const start = Date.now();
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      if (!overlayById.has(String(messageId))) return true;
+      if (!hasOverlayMessageId(String(messageId))) return true;
       if (Date.now() - start > timeoutMs) return false;
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, 120));
@@ -652,7 +648,7 @@ function ensureReviewBar() {
       );
       const ids = [...new Set(sortedItems.map((x) => x.messageId))];
       for (const id of ids) {
-        if (!overlayById.has(String(id))) continue;
+        if (!hasOverlayMessageId(String(id))) continue;
         dispatchPanelAction(id, action);
         // eslint-disable-next-line no-await-in-loop
         await waitForOverlayGone(id, 10000);
@@ -763,159 +759,51 @@ function matchesActiveFile(
   activeName: string | null,
   filePath: string
 ): boolean {
-  // If we can't detect the active tab name (Overleaf DOM not ready / changed),
-  // do NOT block rendering—range resolution will fail safely if it's the wrong file.
-  if (!activeName) return true;
+  if (!activeName) return false;
   const active = activeName.trim().toLowerCase();
   const target = filePath.trim().toLowerCase();
   const base = normalizeFileName(target).toLowerCase();
   return active === target || active === base;
 }
 
-function findUniqueRange(
-  fullText: string,
-  needle: string
-): { from: number; to: number } | null {
-  if (!needle) return null;
-  const first = fullText.indexOf(needle);
-  if (first === -1) return null;
-  const second = fullText.indexOf(needle, first + needle.length);
-  if (second !== -1) return null;
-  return { from: first, to: first + needle.length };
-}
-
-function findFirstOccurrence(
-  fullText: string,
-  needle: string
-): { from: number; to: number } | null {
-  if (!needle) return null;
-  const idx = fullText.indexOf(needle);
-  if (idx === -1) return null;
-  return { from: idx, to: idx + needle.length };
-}
-
-function findTrimmedRange(
-  fullText: string,
-  needle: string
-): { from: number; to: number } | null {
-  const trimmed = needle.trim();
-  if (!trimmed || trimmed === needle) return null;
-  return findUniqueRange(fullText, trimmed);
-}
-
-function findNormalizedRange(
-  fullText: string,
-  needle: string
-): { from: number; to: number } | null {
-  const normalize = (s: string) =>
-    s
-      .replace(/[^\S\n]+/g, ' ')
-      .replace(/\n\s*\n/g, '\n')
-      .trim();
-  const normNeedle = normalize(needle);
-  const normFull = normalize(fullText);
-  if (!normNeedle) return null;
-  const idx = normFull.indexOf(normNeedle);
-  if (idx === -1) return null;
-  // Map back to original coordinates: walk both strings in parallel
-  let origIdx = 0;
-  let normIdx = 0;
-  while (normIdx < idx && origIdx < fullText.length) {
-    const nc = normalize(fullText.slice(0, origIdx + 1));
-    if (nc.length > normIdx) normIdx = nc.length;
-    origIdx++;
-  }
-  // Approximate: use the original text length for the span
-  const from = origIdx;
-  const approxLen = needle.trim().length;
-  const to = Math.min(fullText.length, from + approxLen);
-  return { from, to };
-}
-
 function resolveOverlayRange(
   view: ReturnType<typeof getCmView>,
-  payload: OverlayPayload,
-  precomputedFullText?: string
+  payload: OverlayPayload
 ): OverlayRange | null {
   const state = view.state;
   const oldText = payload.oldText ?? '';
   const newText = payload.newText ?? '';
 
-  if (payload.kind === 'insertAtCursor') {
-    const head = state.selection.main.head;
-    return { from: head, to: head, oldText: '', newText };
-  }
-
-  // Defer fullText computation to after insertAtCursor early return
-  const fullText = precomputedFullText ?? state.sliceDoc(0, state.doc.length);
-
-  // Strategy A: Exact from/to + content match
   if (
-    typeof payload.from === 'number' &&
-    typeof payload.to === 'number' &&
-    payload.to >= payload.from
+    !Number.isInteger(payload.from) ||
+    !Number.isInteger(payload.to) ||
+    payload.from! < 0 ||
+    payload.to! < payload.from! ||
+    payload.to! > state.doc.length
   ) {
-    const current = state.sliceDoc(payload.from, payload.to);
-    if (!oldText || current === oldText) {
-      return { from: payload.from, to: payload.to, oldText: current, newText };
-    }
+    return null;
+  }
+  const from = payload.from as number;
+  const to = payload.to as number;
+
+  if (payload.kind === 'insertAtCursor') {
+    if (from !== to || oldText !== '') return null;
+    return {
+      from,
+      to,
+      oldText: '',
+      newText,
+    };
   }
 
-  // Strategy B: Unique text search (exact indexOf, must be unique)
-  if (oldText) {
-    const resolved = findUniqueRange(fullText, oldText);
-    if (resolved) {
-      return { ...resolved, oldText, newText };
-    }
-  }
-
-  // Strategy C: First occurrence (drop uniqueness constraint)
-  if (oldText) {
-    const resolved = findFirstOccurrence(fullText, oldText);
-    if (resolved) {
-      return { ...resolved, oldText, newText };
-    }
-  }
-
-  // Strategy D: Trimmed text search
-  if (oldText) {
-    const resolved = findTrimmedRange(fullText, oldText);
-    if (resolved) {
-      const trimmed = oldText.trim();
-      return { ...resolved, oldText: trimmed, newText };
-    }
-  }
-
-  // Strategy E: Normalized whitespace search
-  if (oldText && oldText.length > 20) {
-    const resolved = findNormalizedRange(fullText, oldText);
-    if (resolved) {
-      const current = state.sliceDoc(resolved.from, resolved.to);
-      return {
-        from: resolved.from,
-        to: resolved.to,
-        oldText: current,
-        newText,
-      };
-    }
-  }
-
-  if (isDebugEnabled()) {
-    logOnce(
-      'resolve-fail-' + (payload.messageId ?? ''),
-      'resolveOverlayRange: all strategies failed',
-      {
-        messageId: payload.messageId,
-        kind: payload.kind,
-        oldTextLen: oldText.length,
-        oldTextPreview: oldText.slice(0, 200),
-        hasFromTo:
-          typeof payload.from === 'number' && typeof payload.to === 'number',
-      }
-    );
-  }
-
-  return null;
+  const current = state.sliceDoc(from, to);
+  if (current !== oldText) return null;
+  return {
+    from,
+    to,
+    oldText,
+    newText,
+  };
 }
 
 function ensureOverlayRoot(view: ReturnType<typeof getCmView>) {
@@ -1558,19 +1446,16 @@ function renderOverlay() {
         !matchesActiveFile(activeName, payload.fileName)
       )
         continue;
-      // insertAtCursor depends on cursor position — always resolve fresh
-      if (payload.kind === 'insertAtCursor') {
-        const range = resolveOverlayRange(view, payload);
-        if (range)
-          resolved.push({ messageId: payload.messageId, payload, range });
-        continue;
-      }
-      const cached = resolveCache.get(payload.messageId);
+      const cached = resolveCache.get(payload.transactionId);
       if (cached)
-        resolved.push({ messageId: payload.messageId, payload, range: cached });
+        resolved.push({
+          transactionId: payload.transactionId,
+          messageId: payload.messageId,
+          payload,
+          range: cached,
+        });
     }
   } else {
-    const fullText = view.state.sliceDoc(0, view.state.doc.length); // ONCE per miss
     resolveCache.clear();
     resolved = [];
     for (const payload of overlayById.values()) {
@@ -1582,10 +1467,15 @@ function renderOverlay() {
         !matchesActiveFile(activeName, payload.fileName)
       )
         continue;
-      const range = resolveOverlayRange(view, payload, fullText);
-      resolveCache.set(payload.messageId, range);
+      const range = resolveOverlayRange(view, payload);
+      resolveCache.set(payload.transactionId, range);
       if (range)
-        resolved.push({ messageId: payload.messageId, payload, range });
+        resolved.push({
+          transactionId: payload.transactionId,
+          messageId: payload.messageId,
+          payload,
+          range,
+        });
     }
     resolveCacheDoc = view.state.doc;
     resolveCacheOverlayVersion = overlaySetVersion;
@@ -1601,20 +1491,6 @@ function renderOverlay() {
     }))
     .sort((a, b) => a.from - b.from);
   updateReviewBar(activeNameForBar, barItems);
-
-  // Clear the editor selection highlight once when new overlays appear,
-  // so the blue "rewrite selection" shadow doesn't linger behind the diff.
-  if (resolved.length > 0 && overlaySetVersion !== lastSelectionClearVersion) {
-    lastSelectionClearVersion = overlaySetVersion;
-    try {
-      const sel = view.state.selection;
-      if (sel && sel.main && sel.main.from !== sel.main.to) {
-        view.dispatch({ selection: { anchor: sel.main.to } });
-      }
-    } catch {
-      // ignore — selection clearing is best-effort
-    }
-  }
 
   // If there are no overlays at all, ensure we clear any rendered overlay artifacts and stop.
   if (overlayById.size === 0) {
@@ -1690,7 +1566,7 @@ function renderOverlay() {
   }
   // Reuse from resolved array — if not found, clear (same as original behavior).
   const lastResolved = resolved.find(
-    (r) => r.messageId === overlayState.messageId
+    (r) => r.transactionId === overlayState.transactionId
   );
   if (!lastResolved) {
     clearOverlayElements();
@@ -1993,21 +1869,21 @@ function clearOverlay() {
 
 function onOverlayShow(event: Event) {
   const detail = (event as CustomEvent<OverlayPayload>).detail;
-  if (!detail?.messageId || !detail.kind) return;
+  if (!detail?.messageId || !detail.transactionId || !detail.kind) return;
   ensureInlineDiffStyles();
-  overlayById.set(String(detail.messageId), detail);
+  overlayById.set(String(detail.transactionId), detail);
   overlaySetVersion++;
   startOverlayUpdates();
   scheduleOverlayUpdate();
   if (isDebugEnabled()) {
-    logOnce(`show:${detail.messageId}`, 'received overlay show', detail);
+    logOnce(`show:${detail.transactionId}`, 'received overlay show', detail);
   }
 }
 
 function onOverlayClear(event: Event) {
-  const detail = (event as CustomEvent<{ messageId?: string }>).detail;
-  if (detail?.messageId) {
-    overlayById.delete(String(detail.messageId));
+  const detail = (event as CustomEvent<{ transactionId?: string }>).detail;
+  if (detail?.transactionId) {
+    overlayById.delete(String(detail.transactionId));
     overlaySetVersion++;
     // If that was the last one, fully clear (also hides bar). Otherwise re-render.
     if (overlayById.size === 0) {
@@ -2110,74 +1986,4 @@ export function registerInlineDiffOverlay() {
   // Flag for consumers (panel) that may mount after the ready event has fired.
   (window as any).__ageafOverlayReady = true;
   window.dispatchEvent(new CustomEvent(OVERLAY_READY_EVENT));
-
-  // Rehydrate last overlay after refresh (best-effort).
-  const tryRestoreFromStorage = () => {
-    if (overlayById.size > 0) return;
-    try {
-      const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY_INLINE_OVERLAY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as OverlayPayload | OverlayPayload[];
-        const list = Array.isArray(parsed)
-          ? parsed
-          : parsed?.messageId
-          ? [parsed]
-          : [];
-        if (list.length > 0) {
-          const currentProjectId = getCurrentProjectId();
-          for (const stored of list) {
-            if (!stored?.messageId) continue;
-            if (
-              !stored.projectId ||
-              !currentProjectId ||
-              stored.projectId === currentProjectId
-            ) {
-              onOverlayShow(
-                new CustomEvent(OVERLAY_SHOW_EVENT, { detail: stored }) as any
-              );
-            }
-          }
-          return;
-        }
-      }
-    } catch {
-      // ignore storage errors
-    }
-
-    // Fallback to chrome.storage.local if present (older persistence).
-    try {
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        chrome.storage.local.get([LOCAL_STORAGE_KEY_INLINE_OVERLAY], (data) => {
-          if (overlayById.size > 0) return;
-          const storedAny = data?.[LOCAL_STORAGE_KEY_INLINE_OVERLAY] as
-            | OverlayPayload
-            | OverlayPayload[]
-            | undefined;
-          const list = Array.isArray(storedAny)
-            ? storedAny
-            : storedAny?.messageId
-            ? [storedAny]
-            : [];
-          if (list.length === 0) return;
-          const currentProjectId = getCurrentProjectId();
-          for (const stored of list) {
-            if (!stored?.messageId) continue;
-            if (
-              !stored.projectId ||
-              !currentProjectId ||
-              stored.projectId === currentProjectId
-            ) {
-              onOverlayShow(
-                new CustomEvent(OVERLAY_SHOW_EVENT, { detail: stored }) as any
-              );
-            }
-          }
-        });
-      }
-    } catch {
-      // ignore storage errors
-    }
-  };
-
-  tryRestoreFromStorage();
 }

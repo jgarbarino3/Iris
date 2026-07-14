@@ -55,13 +55,18 @@ import type {
   TransactionRuntimeResponseV1,
 } from '../../transactions/contracts';
 import type { SupersedeTransactionResultV1 } from '../../transactions/transactionService';
+import {
+  compactPatchReviewForStorage,
+  compactProjectChatTransactions,
+  projectTransactionPatchReview,
+  reconcileProjectChatTransactions,
+} from './transactionProjection';
 import type {
   NativeHostRequest,
   NativeHostResponse,
 } from '../messaging/nativeProtocol';
 import { getOptions, invalidateOptionsCache } from '../../utils/helper';
 import {
-  LOCAL_STORAGE_KEY_INLINE_OVERLAY,
   LOCAL_STORAGE_KEY_OPTIONS,
   LOCAL_STORAGE_KEY_DISMISSED_UPDATE_COMMIT_SHA,
   LOCAL_STORAGE_KEY_LAST_SEEN_REMOTE_COMMIT_SHA,
@@ -352,15 +357,6 @@ function upsertPatchReviewMessage<T extends { patchReview?: StoredPatchReview }>
   const next = [...messages];
   next[existingIndex] = patchMessage;
   return next;
-}
-
-function computeLineFromOffset(content: string, from: number) {
-  const offset = Math.max(0, Math.min(content.length, Math.floor(from)));
-  let line = 1;
-  for (let index = 0; index < offset; index += 1) {
-    if (content.charCodeAt(index) === 10) line += 1; // '\n'
-  }
-  return line;
 }
 
 function computeFileSummary(messages: Message[]): FileSummaryEntry[] {
@@ -1445,7 +1441,6 @@ const Panel = () => {
     conversationId?: string | null;
     force?: boolean;
   } | null>(null);
-  const lineFromBackfillAttemptedRef = useRef<Set<string>>(new Set());
   const durableProjectionSyncRef = useRef<Set<string>>(new Set());
 
   const providerDisplay =
@@ -2727,22 +2722,28 @@ const Panel = () => {
         : {}),
       ...(message.documents && message.documents.length > 0
         ? {
-          documents: message.documents.map((doc) => ({
-            id: doc.id,
-            name: doc.name,
-            mediaType: doc.mediaType,
-            size: doc.size,
-          }))
-        }
+            documents: message.documents.map((doc) => ({
+              id: doc.id,
+              name: doc.name,
+              mediaType: doc.mediaType,
+              size: doc.size,
+            })),
+          }
         : {}),
-      ...(message.patchReview ? { patchReview: message.patchReview } : {}),
+      ...(message.patchReview
+        ? {
+            patchReview: compactPatchReviewForStorage(
+              message.patchReview
+            ) as StoredPatchReview,
+          }
+        : {}),
     }));
 
   const flushChatSave = async () => {
     const projectId = chatProjectIdRef.current;
     const state = chatStateRef.current;
     if (!projectId || !state) return;
-    await saveProjectChat(projectId, state);
+    await saveProjectChat(projectId, compactProjectChatTransactions(state));
   };
 
   const scheduleChatSave = () => {
@@ -2755,188 +2756,36 @@ const Panel = () => {
     }, 250);
   };
 
-  useEffect(() => {
-    const conversationId = chatConversationIdRef.current;
-    const bridge = window.ageafBridge;
-    if (!conversationId || !bridge?.requestFileContent) return;
-
-    type BackfillEntry = {
-      messageId: string;
-      filePath: string;
-      from: number;
-      identityKey: string;
-    };
-
-    const entries: BackfillEntry[] = [];
-    for (const message of messages) {
-      if (lineFromBackfillAttemptedRef.current.has(message.id)) continue;
-      const patchReview = message.patchReview;
-      if (!patchReview || patchReview.kind !== 'replaceRangeInFile') continue;
-      if (
-        typeof patchReview.lineFrom === 'number' &&
-        Number.isFinite(patchReview.lineFrom) &&
-        patchReview.lineFrom > 0
-      ) {
-        continue;
-      }
-      if (
-        typeof patchReview.from !== 'number' ||
-        !Number.isFinite(patchReview.from) ||
-        patchReview.from < 0
-      ) {
-        continue;
-      }
-      entries.push({
-        messageId: message.id,
-        filePath: patchReview.filePath,
-        from: patchReview.from,
-        identityKey: getReplaceRangeIdentityKey(patchReview),
-      });
-    }
-
-    if (entries.length === 0) return;
-
-    const byFile = new Map<
-      string,
-      { filePath: string; entries: BackfillEntry[] }
-    >();
-    for (const entry of entries) {
-      const key = entry.filePath.toLowerCase();
-      const group = byFile.get(key);
-      if (group) {
-        group.entries.push(entry);
-      } else {
-        byFile.set(key, { filePath: entry.filePath, entries: [entry] });
-      }
-    }
-
-    let cancelled = false;
-    void (async () => {
-      for (const group of byFile.values()) {
-        if (cancelled) return;
-        const activeFilename = getActiveFilename()?.toLowerCase() ?? null;
-        const normalizedFilePath = group.filePath.trim().toLowerCase();
-        const normalizedBaseName =
-          normalizedFilePath.split('/').filter(Boolean).pop() ??
-          normalizedFilePath;
-        if (
-          !activeFilename ||
-          (normalizedFilePath !== activeFilename &&
-            normalizedBaseName !== activeFilename)
-        ) {
-          continue;
-        }
-        for (const entry of group.entries) {
-          lineFromBackfillAttemptedRef.current.add(entry.messageId);
-        }
-
-        let response: any = null;
-        try {
-          response = await bridge.requestFileContent(group.filePath);
-        } catch {
-          response = null;
-        }
-        if (cancelled) return;
-        if (!response?.ok || typeof response.content !== 'string') continue;
-
-        const content = response.content;
-        const lineFromById = new Map<string, number>();
-        const lineFromByIdentity = new Map<string, number>();
-        for (const entry of group.entries) {
-          const lineFrom = computeLineFromOffset(content, entry.from);
-          lineFromById.set(entry.messageId, lineFrom);
-          if (!lineFromByIdentity.has(entry.identityKey)) {
-            lineFromByIdentity.set(entry.identityKey, lineFrom);
-          }
-        }
-
-        if (lineFromById.size === 0) continue;
-
-        setMessages((prev) => {
-          let changed = false;
-          const next = prev.map((message) => {
-            const lineFrom = lineFromById.get(message.id);
-            if (typeof lineFrom !== 'number') return message;
-            const patchReview = message.patchReview;
-            if (!patchReview || patchReview.kind !== 'replaceRangeInFile') {
-              return message;
-            }
-            if (
-              typeof patchReview.lineFrom === 'number' &&
-              Number.isFinite(patchReview.lineFrom) &&
-              patchReview.lineFrom > 0
-            ) {
-              return message;
-            }
-            changed = true;
-            return {
-              ...message,
-              patchReview: {
-                ...patchReview,
-                lineFrom,
-              },
-            };
-          });
-          return changed ? next : prev;
-        });
-
-        const state = chatStateRef.current;
-        const conversation = state
-          ? findConversation(state, conversationId)
-          : null;
-        if (!state || !conversation) continue;
-
-        let storedChanged = false;
-        const updatedStoredMessages = conversation.messages.map((stored) => {
-          const patchReview = stored.patchReview;
-          if (!patchReview || patchReview.kind !== 'replaceRangeInFile') {
-            return stored;
-          }
-          if (
-            typeof patchReview.lineFrom === 'number' &&
-            Number.isFinite(patchReview.lineFrom) &&
-            patchReview.lineFrom > 0
-          ) {
-            return stored;
-          }
-          const key = getPatchIdentityKey(stored);
-          if (!key) return stored;
-          const lineFrom = lineFromByIdentity.get(key);
-          if (typeof lineFrom !== 'number') return stored;
-          storedChanged = true;
-          return {
-            ...stored,
-            patchReview: {
-              ...patchReview,
-              lineFrom,
-            },
-          };
-        });
-
-        if (storedChanged) {
-          chatStateRef.current = setConversationMessages(
-            state,
-            conversation.provider,
-            conversationId,
-            updatedStoredMessages
-          );
-          scheduleChatSave();
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [messages]);
-
   const hydrateChatForProject = async (
     projectId: string,
     isActive: () => boolean
   ) => {
     chatHydratedRef.current = false;
-    const stored = await loadProjectChat(projectId);
+    const loaded = await loadProjectChat(projectId);
     if (!isActive()) return;
+    const reconciled = await reconcileProjectChatTransactions({
+      projectId,
+      state: loaded,
+      client: {
+        propose: (proposal) =>
+          transactionRpc<EditTransactionV1>('propose', proposal),
+        list: (recordedProjectId) =>
+          transactionRpc<EditTransactionV1[]>('list', {
+            projectId: recordedProjectId,
+          }),
+        listOperations: (recordedProjectId) =>
+          transactionRpc<EditOperationV1[]>('listOperations', {
+            projectId: recordedProjectId,
+          }),
+        reconcile: (recordedProjectId) =>
+          transactionRpc<EditTransactionV1[]>('reconcile', {
+            projectId: recordedProjectId,
+          }),
+      },
+    });
+    if (!isActive()) return;
+    const stored = reconciled.state;
+    setRecoveryOperation(reconciled.recoveryOperation ?? null);
     const provider = stored.activeProvider;
     const hasConversations =
       (stored.providers.claude.conversations?.length ?? 0) > 0 ||
@@ -3094,11 +2943,7 @@ const Panel = () => {
   useEffect(() => {
     for (const message of messages) {
       const review = message.patchReview;
-      if (
-        !review ||
-        !review.transactionId ||
-        !review.projectId
-      ) {
+      if (!review || !review.transactionId || !review.projectId) {
         continue;
       }
       const syncKey = `${message.id}:${review.transactionId}:${
@@ -3130,80 +2975,79 @@ const Panel = () => {
             throw new Error('Durable edit transaction is missing');
           }
         }
-        let supersededOriginalId: string | undefined;
-        if (
-          transaction.state === 'superseded' &&
-          transaction.supersededByTransactionId
+        let authoritative: EditTransactionV1 = transaction;
+        const seenSuccessors = new Set<string>();
+        while (
+          authoritative.state === 'superseded' &&
+          authoritative.supersededByTransactionId
         ) {
-          supersededOriginalId = transaction.id;
-          const successor = await transactionRpc<EditTransactionV1 | null>(
-            'getSuccessor',
-            { projectId: transaction.projectId, id: transaction.id }
-          );
+          if (seenSuccessors.has(authoritative.id)) {
+            throw new Error('Durable successor relationship is cyclic');
+          }
+          seenSuccessors.add(authoritative.id);
+          const successor: EditTransactionV1 | null =
+            await transactionRpc<EditTransactionV1 | null>('getSuccessor', {
+              projectId: authoritative.projectId,
+              id: authoritative.id,
+            });
           if (!successor) {
             throw new Error('Durable successor transaction is missing');
           }
-          transaction = successor;
+          authoritative = successor;
         }
-        if (transaction.state === 'conflicted' && !transaction.conflict) {
-          transaction = await transactionRpc<EditTransactionV1>(
+        if (authoritative.state === 'conflicted' && !authoritative.conflict) {
+          authoritative = await transactionRpc<EditTransactionV1>(
             'inspectConflict',
             {
-              projectId: transaction.projectId,
-              id: transaction.id,
-              expectedRevision: transaction.revision,
+              projectId: authoritative.projectId,
+              id: authoritative.id,
+              expectedRevision: authoritative.revision,
             }
           );
         }
-
-        const durableStatus: PatchReviewStatus =
-          transaction.state === 'applied' &&
-          transaction.receipt?.success === true
-            ? 'accepted'
-            : transaction.state === 'rejected'
-            ? 'rejected'
-            : 'pending';
-        const durableError =
-          transaction.state === 'failed' ||
-          (transaction.state === 'applied' &&
-            transaction.receipt?.success !== true)
-            ? transaction.failure?.message ??
-              'Edit has no trustworthy persisted receipt'
-            : undefined;
 
         setMessages((previous) =>
           previous.map((entry) => {
             if (entry.id !== message.id) return entry;
             const current = entry.patchReview;
             if (!current) return entry;
-            const projected =
-              current.transactionId !== transaction!.id
-                ? projectSuccessorPatchReview(current, transaction!)
-                : current;
             return {
               ...entry,
-              patchReview: {
-                ...projected,
-                status: durableStatus,
-                transactionId: transaction!.id,
-                projectId: transaction!.projectId,
-                transactionRevision: transaction!.revision,
-                conflictPreview: transaction!.conflict,
-                ...(supersededOriginalId
-                  ? { successorTransactionId: transaction!.id }
-                  : {}),
-                ...(durableError
-                  ? { transactionError: durableError }
-                  : { transactionError: undefined }),
-              },
+              patchReview: projectTransactionPatchReview(
+                authoritative,
+                current
+              ),
             };
           })
         );
       })().catch((error) => {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        setMessages((previous) =>
+          previous.map((entry) => {
+            if (entry.id !== message.id || !entry.patchReview) return entry;
+            return {
+              ...entry,
+              patchReview: {
+                ...entry.patchReview,
+                status: 'pending',
+                transactionError: errorMessage,
+                projection: {
+                  schemaVersion: 1,
+                  key: `migration-error:${review.transactionId}`,
+                  mode: 'retarget-required',
+                  readOnly: true,
+                  reasonCode: errorMessage.includes('successor')
+                    ? 'SUCCESSOR_MISSING'
+                    : 'TRANSACTION_MISSING',
+                },
+              },
+            };
+          })
+        );
         setPatchActionErrors((previous) => ({
           ...previous,
-          [message.id]:
-            error instanceof Error ? error.message : String(error),
+          [message.id]: errorMessage,
         }));
       });
     }
@@ -5217,7 +5061,10 @@ const Panel = () => {
       const status = (patchReview as any).status ?? 'pending';
       const error = patchActionErrors[message.id] ?? null;
       const busy = patchActionBusyId === message.id || bulkActionBusy;
-      const canAct = status === 'pending' && !busy;
+      const canAct =
+        status === 'pending' &&
+        !busy &&
+        patchReview.projection?.readOnly !== true;
       if (
         patchReview.kind === 'replaceRangeInFile' &&
         !patchReview.conflictPreview
@@ -9708,6 +9555,7 @@ const Panel = () => {
     );
     const patchReview = latest?.patchReview;
     if (!patchReview) return;
+    if (patchReview.projection?.readOnly) return;
     const prevStatus = ((patchReview as any).status ??
       'pending') as PatchReviewStatus;
     if (prevStatus !== 'pending') return;
@@ -9751,6 +9599,7 @@ const Panel = () => {
     const msg = messages.find((m) => m.id === messageId);
     const patchReview = msg?.patchReview;
     if (!patchReview) return;
+    if (patchReview.projection?.readOnly) return;
     const status = (patchReview as any).status ?? 'pending';
     if (status !== 'pending') return;
 
@@ -10074,6 +9923,7 @@ const Panel = () => {
     const msg = messages.find((m) => m.id === messageId);
     const patchReview = msg?.patchReview;
     if (!patchReview) return;
+    if (patchReview.projection?.readOnly) return;
     const status = (patchReview as any).status ?? 'pending';
     if (status !== 'pending') return;
 
@@ -10094,6 +9944,7 @@ const Panel = () => {
           if (!message.patchReview) return false;
           return (
             ((message.patchReview as any).status ?? 'pending') === 'pending' &&
+            message.patchReview.projection?.readOnly !== true &&
             !message.patchReview.conflictPreview
           );
         })
@@ -10112,7 +9963,10 @@ const Panel = () => {
     const pendingEntries = messagesRef.current.filter((message) => {
       if (!message.patchReview) return false;
       const status = (message.patchReview as any).status ?? 'pending';
-      return status === 'pending';
+      return (
+        status === 'pending' &&
+        message.patchReview.projection?.readOnly !== true
+      );
     });
     if (pendingEntries.length === 0) return;
 
@@ -10177,7 +10031,8 @@ const Panel = () => {
             patchReview &&
               patchReview.kind === 'replaceRangeInFile' &&
               patchReview.filePath.toLowerCase() === fileKey &&
-              !patchReview.conflictPreview
+              !patchReview.conflictPreview &&
+              patchReview.projection?.readOnly !== true
           );
         })
         .filter(
@@ -10204,7 +10059,9 @@ const Panel = () => {
         }
         if (patchReview.filePath.toLowerCase() !== fileKey) return false;
         const status = (patchReview as any).status ?? 'pending';
-        return status === 'pending';
+        return (
+          status === 'pending' && patchReview.projection?.readOnly !== true
+        );
       })
       .map((entry) => entry.id);
     if (pendingEntries.length === 0) return;
@@ -10358,23 +10215,19 @@ const Panel = () => {
     const pendingMessages = [...messages].filter(
       (msg) =>
         msg.patchReview &&
-        ((msg.patchReview as any).status ?? 'pending') === 'pending'
+        ((msg.patchReview as any).status ?? 'pending') === 'pending' &&
+        Boolean(msg.patchReview.transactionId) &&
+        Boolean(msg.patchReview.projectId) &&
+        msg.patchReview.projection?.mode === 'transaction-backed' &&
+        msg.patchReview.projection.readOnly !== true
     );
     if (pendingMessages.length === 0) {
-      // During initial mount, messages are temporarily empty until chat hydration finishes.
-      // Do NOT clear the stored overlay in that window, or refresh restore will never show.
+      // During initial mount, messages are temporarily empty until durable
+      // transaction projections finish hydrating.
       if (!chatHydratedRef.current) return;
       if (overlayActiveDetailsRef.current.size > 0) {
         window.dispatchEvent(new CustomEvent(EDITOR_OVERLAY_CLEAR_EVENT));
         overlayActiveDetailsRef.current.clear();
-      }
-      try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          chrome.storage.local.remove([LOCAL_STORAGE_KEY_INLINE_OVERLAY]);
-        }
-        window.localStorage.removeItem(LOCAL_STORAGE_KEY_INLINE_OVERLAY);
-      } catch {
-        // ignore storage errors
       }
       return;
     }
@@ -10386,19 +10239,20 @@ const Panel = () => {
         if (status !== 'pending') return null;
         return {
           messageId: msg.id,
+          transactionId: patchReview.transactionId,
           kind: patchReview.kind,
           from:
             patchReview.kind === 'replaceSelection'
               ? patchReview.from
               : patchReview.kind === 'replaceRangeInFile'
               ? patchReview.from
-              : undefined,
+              : patchReview.from,
           to:
             patchReview.kind === 'replaceSelection'
               ? patchReview.to
               : patchReview.kind === 'replaceRangeInFile'
               ? patchReview.to
-              : undefined,
+              : patchReview.to,
           oldText:
             patchReview.kind === 'replaceSelection'
               ? patchReview.selection
@@ -10409,19 +10263,30 @@ const Panel = () => {
           filePath:
             patchReview.kind === 'replaceRangeInFile'
               ? patchReview.filePath
+              : patchReview.kind === 'insertAtCursor'
+              ? patchReview.filePath
               : undefined,
           fileName:
             patchReview.kind === 'replaceSelection'
               ? patchReview.fileName ?? undefined
               : undefined,
-          projectId: getOverleafProjectIdFromPathname(window.location.pathname),
+          projectId: patchReview.projectId,
+          conflict: patchReview.conflictPreview
+            ? {
+                strictRebaseAvailable:
+                  patchReview.conflictPreview.strictRebaseAvailable,
+                unavailableReason:
+                  patchReview.conflictPreview.unavailableReason,
+                candidateCount: patchReview.conflictPreview.candidateCount,
+              }
+            : undefined,
         };
       })
       .filter(Boolean) as any[];
 
     const nextDetails = new Map<string, string>();
     for (const detail of pendingDetails) {
-      const id = String(detail.messageId);
+      const id = String(detail.transactionId);
       const signature = JSON.stringify({
         kind: detail.kind,
         from: detail.from ?? null,
@@ -10441,7 +10306,7 @@ const Panel = () => {
       if (!nextIds.has(prevId)) {
         window.dispatchEvent(
           new CustomEvent(EDITOR_OVERLAY_CLEAR_EVENT, {
-            detail: { messageId: prevId },
+            detail: { transactionId: prevId },
           })
         );
       }
@@ -10449,7 +10314,7 @@ const Panel = () => {
 
     // Emit shows for all pending overlays (new, changed, or forced)
     for (const detail of pendingDetails) {
-      const id = String(detail.messageId);
+      const id = String(detail.transactionId);
       const prevSignature = prevDetails.get(id);
       const nextSignature = nextDetails.get(id);
       if (!force && prevSignature === nextSignature) continue;
@@ -10459,21 +10324,6 @@ const Panel = () => {
     }
 
     overlayActiveDetailsRef.current = nextDetails;
-
-    // Persist the full pending set for refresh restore.
-    try {
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        chrome.storage.local.set({
-          [LOCAL_STORAGE_KEY_INLINE_OVERLAY]: pendingDetails,
-        });
-      }
-      window.localStorage.setItem(
-        LOCAL_STORAGE_KEY_INLINE_OVERLAY,
-        JSON.stringify(pendingDetails)
-      );
-    } catch {
-      // ignore storage errors
-    }
   };
 
   useEffect(() => {
@@ -10504,7 +10354,10 @@ const Panel = () => {
     const hasPending = messages.some(
       (msg) =>
         msg.patchReview &&
-        ((msg.patchReview as any).status ?? 'pending') === 'pending'
+        ((msg.patchReview as any).status ?? 'pending') === 'pending' &&
+        Boolean(msg.patchReview.transactionId) &&
+        msg.patchReview.projection?.mode === 'transaction-backed' &&
+        msg.patchReview.projection.readOnly !== true
     );
     if (!hasPending) return;
 
@@ -10536,13 +10389,6 @@ const Panel = () => {
   useEffect(() => {
     return () => {
       window.dispatchEvent(new CustomEvent(EDITOR_OVERLAY_CLEAR_EVENT));
-      try {
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          chrome.storage.local.remove([LOCAL_STORAGE_KEY_INLINE_OVERLAY]);
-        }
-      } catch {
-        // ignore storage errors
-      }
     };
   }, []);
 

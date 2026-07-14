@@ -44,7 +44,10 @@ test('Panel routes single and bulk acceptance through the explicit subset author
 test('Panel defines bulk accept and bulk reject handlers', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
-  assert.match(contents, /const \[bulkActionBusy,\s*setBulkActionBusy\] = useState\(false\)/);
+  assert.match(
+    contents,
+    /const \[bulkActionBusy,\s*setBulkActionBusy\] = useState\(false\)/
+  );
   assert.match(contents, /const onBulkAcceptAll = async \(\) => \{/);
   assert.match(contents, /const onBulkRejectAll = async \(\) => \{/);
 });
@@ -72,8 +75,14 @@ test('Panel anchors summary card between chat and runtime and only when pending 
 test('central editor adapter exposes bounded navigateToFile bridge call', () => {
   const contents = read('src/iso/editorAdapter.ts');
 
-  assert.match(contents, /navigateRequest: 'ageaf:editor:file-navigate:request'/);
-  assert.match(contents, /navigateResponse: 'ageaf:editor:file-navigate:response'/);
+  assert.match(
+    contents,
+    /navigateRequest: 'ageaf:editor:file-navigate:request'/
+  );
+  assert.match(
+    contents,
+    /navigateResponse: 'ageaf:editor:file-navigate:response'/
+  );
   assert.match(contents, /async navigateToFile\(name: string\)/);
   assert.match(contents, /READ_TIMEOUT_MS/);
 });
@@ -81,10 +90,22 @@ test('central editor adapter exposes bounded navigateToFile bridge call', () => 
 test('editor bridge listens for file navigation requests', () => {
   const contents = read('src/main/editorBridge/bridge.ts');
 
-  assert.match(contents, /const FILE_NAVIGATE_REQUEST_EVENT = 'ageaf:editor:file-navigate:request';/);
-  assert.match(contents, /const FILE_NAVIGATE_RESPONSE_EVENT = 'ageaf:editor:file-navigate:response';/);
-  assert.match(contents, /async function onFileNavigateRequest\(event: Event\)/);
-  assert.match(contents, /window\.addEventListener\(FILE_NAVIGATE_REQUEST_EVENT,\s*onFileNavigateRequest as EventListener\)/);
+  assert.match(
+    contents,
+    /const FILE_NAVIGATE_REQUEST_EVENT = 'ageaf:editor:file-navigate:request';/
+  );
+  assert.match(
+    contents,
+    /const FILE_NAVIGATE_RESPONSE_EVENT = 'ageaf:editor:file-navigate:response';/
+  );
+  assert.match(
+    contents,
+    /async function onFileNavigateRequest\(event: Event\)/
+  );
+  assert.match(
+    contents,
+    /window\.addEventListener\(FILE_NAVIGATE_REQUEST_EVENT,\s*onFileNavigateRequest as EventListener\)/
+  );
 });
 
 test('summary card component and CSS class exist', () => {
@@ -113,14 +134,20 @@ test('GroupedPatchReviewCard component exists', () => {
 test('Panel memoizes grouped patch maps from messages', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
-  assert.match(contents, /const \{ messageById, fileGroupMap, fileGroupRole \} = useMemo\(/);
+  assert.match(
+    contents,
+    /const \{ messageById, fileGroupMap, fileGroupRole \} = useMemo\(/
+  );
 });
 
 test('Panel per-file accept path submits one explicit durable subset', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
   assert.match(contents, /const acceptPatchSubset = async/);
-  assert.match(contents, /transactionRpc<EditOperationV1>\(\s*'applySelection'/);
+  assert.match(
+    contents,
+    /transactionRpc<EditOperationV1>\(\s*'applySelection'/
+  );
   assert.match(
     contents,
     /const onAcceptFilePatches = async \(fileKey: string\)[\s\S]*?await acceptPatchSubset\(selections\);/
@@ -143,15 +170,27 @@ test('GroupedPatchReviewCard keeps a header expand control for full diff modal',
 
   assert.match(contents, /class=\"ageaf-patch-review__expand-btn\"/);
   assert.match(contents, /aria-label=\"Expand diff to full screen\"/);
-  assert.match(contents, /const \[showModal,\s*setShowModal\] = useState\(false\);/);
+  assert.match(
+    contents,
+    /const \[showModal,\s*setShowModal\] = useState\(false\);/
+  );
 });
 
 test('expand control styles use visible foreground and chrome token', () => {
   const panelCss = read('src/iso/panel/panel.css');
 
-  assert.match(panelCss, /\.ageaf-patch-review__expand-btn \{[^}]*color:\s*var\(--ageaf-panel-text\);/);
-  assert.match(panelCss, /\.ageaf-patch-review__expand-btn \{[^}]*border:\s*1px solid /);
-  assert.match(panelCss, /\.ageaf-patch-review__expand-icon \{[^}]*color:\s*var\(--ageaf-panel-text\);/);
+  assert.match(
+    panelCss,
+    /\.ageaf-patch-review__expand-btn \{[^}]*color:\s*var\(--ageaf-panel-text\);/
+  );
+  assert.match(
+    panelCss,
+    /\.ageaf-patch-review__expand-btn \{[^}]*border:\s*1px solid /
+  );
+  assert.match(
+    panelCss,
+    /\.ageaf-patch-review__expand-icon \{[^}]*color:\s*var\(--ageaf-panel-text\);/
+  );
 });
 
 test('Panel keeps replaceRangeInFile groups across status transitions', () => {
@@ -167,10 +206,16 @@ test('Panel keeps replaceRangeInFile groups across status transitions', () => {
   );
 });
 
-test('Panel backfills missing lineFrom using file content and from offset', () => {
+test('Panel does not backfill line metadata from active editor content', () => {
   const contents = read('src/iso/panel/Panel.tsx');
 
-  assert.match(contents, /function computeLineFromOffset\(content: string, from: number\)/);
-  assert.match(contents, /requestFileContent\(group\.filePath\)/);
-  assert.match(contents, /const lineFrom = computeLineFromOffset\(content, entry\.from\);/);
+  assert.doesNotMatch(
+    contents,
+    /function computeLineFromOffset\(content: string, from: number\)/
+  );
+  assert.doesNotMatch(contents, /requestFileContent\(group\.filePath\)/);
+  assert.doesNotMatch(
+    contents,
+    /const lineFrom = computeLineFromOffset\(content, entry\.from\);/
+  );
 });

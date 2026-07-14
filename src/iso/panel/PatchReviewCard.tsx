@@ -152,7 +152,7 @@ export function PatchReviewCard({
   } else if (patchReview.kind === 'replaceSelection') {
     fileLabel = patchReview.fileName ?? 'selection.tex';
   } else if (patchReview.kind === 'insertAtCursor') {
-    fileLabel = 'cursor';
+    fileLabel = patchReview.filePath ?? 'recorded insertion';
   }
 
   let title =
@@ -160,8 +160,15 @@ export function PatchReviewCard({
       ? 'Review insertion'
       : 'Review changes';
   const conflict = patchReview.conflictPreview;
+  const readOnly = patchReview.projection?.readOnly === true;
   if (conflict) {
     title = 'Edit conflict';
+  } else if (patchReview.projection?.mode === 'retarget-required') {
+    title = 'Legacy edit · Retarget required';
+  } else if (patchReview.projection?.mode === 'historical-unverified') {
+    title = 'Legacy edit · Unverified history';
+  } else if (patchReview.projection?.mode === 'migration-error') {
+    title = 'Edit history · Unavailable';
   } else if (status === 'accepted') {
     title = 'Review changes · Accepted';
   } else if (status === 'rejected') {
@@ -215,7 +222,7 @@ export function PatchReviewCard({
           >
             {headerCopied ? <CheckIcon /> : <CopyIcon />}
           </button>
-          {status === 'pending' ? (
+          {status === 'pending' && !readOnly ? (
             <>
               {conflict ? (
                 <>
@@ -312,6 +319,27 @@ export function PatchReviewCard({
             {copied ? <CheckIcon /> : <CopyIcon />}
             <span>Copy proposed text</span>
           </button>
+        </div>
+      ) : null}
+
+      {readOnly && patchReview.projection ? (
+        <div
+          class="ageaf-patch-review__warning"
+          data-projection-mode={patchReview.projection.mode}
+          data-projection-reason={patchReview.projection.reasonCode ?? ''}
+        >
+          <span>
+            {patchReview.projection.mode === 'retarget-required'
+              ? patchReview.projection.reasonCode === 'TRANSACTION_MISSING' ||
+                patchReview.projection.reasonCode === 'SUCCESSOR_MISSING'
+                ? 'The durable transaction chain is unavailable. This history is read-only and must be recreated from an explicit new target.'
+                : 'This legacy edit lacks enough proposal-time evidence to migrate safely. It is read-only and must be recreated from an explicit new target.'
+              : patchReview.projection.mode === 'historical-unverified'
+              ? 'This legacy result is historical only. Its old UI flag is not proof of an acknowledged editor mutation.'
+              : patchReview.projection.reasonCode === 'APPLIED_RECEIPT_MISSING'
+              ? 'The durable record has no acknowledged successful receipt, so it is not shown as accepted.'
+              : 'The durable transaction could not be reconstructed. No editor action is available.'}
+          </span>
         </div>
       ) : null}
 

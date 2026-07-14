@@ -40,13 +40,14 @@ test('inline overlays only route P2-05 actions back to the shared panel commands
 
 test('accepted projection remains receipt-gated and superseded projection follows the durable successor', () => {
   const panel = read('src/iso/panel/Panel.tsx');
+  const projection = read('src/iso/panel/transactionProjection.ts');
   assert.match(
-    panel,
+    projection,
     /transaction\.state === 'applied'[\s\S]*transaction\.receipt\?\.success === true/
   );
-  assert.match(panel, /transaction\.state === 'superseded'/);
+  assert.match(projection, /current\.state === 'superseded'/);
   assert.match(panel, /'getSuccessor'/);
-  assert.match(panel, /successorTransactionId/);
+  assert.match(projection, /supersededByTransactionId/);
 });
 
 test('strict resolution code has a hard 20-candidate ceiling and no nearest-match fallback', () => {
