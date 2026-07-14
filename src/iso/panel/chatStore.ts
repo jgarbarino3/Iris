@@ -61,7 +61,8 @@ export type StoredPatchReviewOutcome =
   | 'preflight-rejected'
   | 'file-batch-failed'
   | 'compensated-failure'
-  | 'recovery-required';
+  | 'recovery-required'
+  | 'reverted';
 
 export type LegacyReviewMigrationReasonV1 =
   | 'LEGACY_INSERT_REQUIRES_RETARGET'
@@ -138,6 +139,8 @@ export type StoredPatchReview = StoredPatchReviewProjectionFields &
         operationId?: string;
         conflictPreview?: ConflictPreviewV1;
         successorTransactionId?: string;
+        inverseTransactionId?: string;
+        revertsTransactionId?: string;
       }
     | {
         kind: 'insertAtCursor';
@@ -156,6 +159,8 @@ export type StoredPatchReview = StoredPatchReviewProjectionFields &
         operationId?: string;
         conflictPreview?: ConflictPreviewV1;
         successorTransactionId?: string;
+        inverseTransactionId?: string;
+        revertsTransactionId?: string;
       }
     | {
         kind: 'replaceRangeInFile';
@@ -176,6 +181,8 @@ export type StoredPatchReview = StoredPatchReviewProjectionFields &
         operationId?: string;
         conflictPreview?: ConflictPreviewV1;
         successorTransactionId?: string;
+        inverseTransactionId?: string;
+        revertsTransactionId?: string;
       }
   );
 
@@ -470,7 +477,8 @@ function normalizePatchReviewOutcome(
     raw === 'preflight-rejected' ||
     raw === 'file-batch-failed' ||
     raw === 'compensated-failure' ||
-    raw === 'recovery-required'
+    raw === 'recovery-required' ||
+    raw === 'reverted'
   ) {
     return raw;
   }
@@ -738,6 +746,12 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
         : {}),
+      ...(typeof raw.inverseTransactionId === 'string'
+        ? { inverseTransactionId: raw.inverseTransactionId }
+        : {}),
+      ...(typeof raw.revertsTransactionId === 'string'
+        ? { revertsTransactionId: raw.revertsTransactionId }
+        : {}),
       ...(projection ? { projection } : {}),
       ...(legacyMigration ? { legacyMigration } : {}),
     };
@@ -776,6 +790,12 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(conflictPreview ? { conflictPreview } : {}),
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
+        : {}),
+      ...(typeof raw.inverseTransactionId === 'string'
+        ? { inverseTransactionId: raw.inverseTransactionId }
+        : {}),
+      ...(typeof raw.revertsTransactionId === 'string'
+        ? { revertsTransactionId: raw.revertsTransactionId }
         : {}),
       ...(projection ? { projection } : {}),
       ...(legacyMigration ? { legacyMigration } : {}),
@@ -836,6 +856,12 @@ function normalizeStoredPatchReview(raw: any): StoredPatchReview | null {
       ...(conflictPreview ? { conflictPreview } : {}),
       ...(typeof raw.successorTransactionId === 'string'
         ? { successorTransactionId: raw.successorTransactionId }
+        : {}),
+      ...(typeof raw.inverseTransactionId === 'string'
+        ? { inverseTransactionId: raw.inverseTransactionId }
+        : {}),
+      ...(typeof raw.revertsTransactionId === 'string'
+        ? { revertsTransactionId: raw.revertsTransactionId }
         : {}),
       ...(projection ? { projection } : {}),
       ...(legacyMigration ? { legacyMigration } : {}),

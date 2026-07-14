@@ -41,6 +41,10 @@ import {
   inspectStrictAnchor,
   type ConflictFileSnapshotV1,
 } from './conflictResolution';
+import {
+  buildDurableInverseProposal,
+  inspectRevertEligibility,
+} from './durableRevert';
 
 export type SupersedeTransactionResultV1 = {
   original: EditTransactionV1;
@@ -82,10 +86,10 @@ export class TransactionService {
 
   async propose(input: ProposeEditTransactionV1): Promise<EditTransactionV1> {
     assertProposal(input);
-    if (input.supersedesTransactionId) {
+    if (input.supersedesTransactionId || input.revertsTransactionId) {
       throw new TransactionError(
         'INVALID_REQUEST',
-        'Supersede links require an atomic supersede command'
+        'Relationship links require an atomic relationship command'
       );
     }
     const timestamp = this.now();
@@ -156,6 +160,219 @@ export class TransactionService {
       );
     }
     return successor;
+  }
+
+  async getRevertRelationship(
+    projectId: string,
+    id: string
+  ): Promise<{
+    schemaVersion: 1;
+    projectId: string;
+    original: EditTransactionV1;
+    inverse?: EditTransactionV1;
+  }> {
+    const transaction = await this.requireTransaction(projectId, id);
+    const original = transaction.revertsTransactionId
+      ? await this.requireTransaction(
+          projectId,
+          transaction.revertsTransactionId
+        )
+      : transaction;
+    if (original.revertsTransactionId) {
+      throw new TransactionError(
+        'INVALID_STATE',
+        'Revert relationship contains a cycle'
+      );
+    }
+    if (!original.revertedByTransactionId) {
+      return { schemaVersion: 1, projectId, original };
+    }
+    const inverse = await this.requireTransaction(
+      projectId,
+      original.revertedByTransactionId
+    );
+    if (inverse.revertsTransactionId !== original.id) {
+      throw new TransactionError(
+        'RECOVERY_REQUIRED',
+        'Revert relationship is incomplete'
+      );
+    }
+    if (transaction.revertsTransactionId && transaction.id !== inverse.id) {
+      let current = transaction;
+      const seen = new Set<string>();
+      while (current.supersededByTransactionId) {
+        if (seen.has(current.id)) {
+          throw new TransactionError(
+            'INVALID_STATE',
+            'Inverse successor relationship contains a cycle'
+          );
+        }
+        seen.add(current.id);
+        const successor = await this.requireTransaction(
+          projectId,
+          current.supersededByTransactionId
+        );
+        if (successor.supersedesTransactionId !== current.id) {
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Inverse successor relationship is incomplete'
+          );
+        }
+        current = successor;
+      }
+      if (current.id !== inverse.id) {
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Transaction is not in the authoritative inverse chain'
+        );
+      }
+    }
+    return { schemaVersion: 1, projectId, original, inverse };
+  }
+
+  async inspectRevertEligibility(
+    projectId: string,
+    id: string,
+    expectedRevision: number
+  ) {
+    const relationship = await this.getRevertRelationship(projectId, id);
+    if (
+      relationship.original.revision !== expectedRevision &&
+      !relationship.inverse
+    ) {
+      throw new TransactionError(
+        'STALE_REVISION',
+        `Expected revision ${expectedRevision}, found ${relationship.original.revision}`
+      );
+    }
+    return inspectRevertEligibility(
+      relationship.original,
+      relationship.inverse ?? null
+    );
+  }
+
+  async createRevert(
+    projectId: string,
+    id: string,
+    expectedRevision: number,
+    readSnapshot: (
+      transaction: EditTransactionV1
+    ) => Promise<ConflictFileSnapshotV1>
+  ): Promise<{
+    schemaVersion: 1;
+    projectId: string;
+    original: EditTransactionV1;
+    inverse: EditTransactionV1;
+  }> {
+    const existingRelationship = await this.getRevertRelationship(
+      projectId,
+      id
+    );
+    const eligibility = inspectRevertEligibility(
+      existingRelationship.original,
+      existingRelationship.inverse ?? null
+    );
+    if (
+      eligibility.disposition === 'return-existing' &&
+      existingRelationship.inverse
+    ) {
+      return {
+        schemaVersion: 1,
+        projectId,
+        original: existingRelationship.original,
+        inverse: existingRelationship.inverse,
+      };
+    }
+    if (!eligibility.eligible || eligibility.disposition !== 'create') {
+      throw new TransactionError(
+        'INVALID_STATE',
+        `Transaction is not safely revertible: ${eligibility.reason}`
+      );
+    }
+    if (existingRelationship.original.revision !== expectedRevision) {
+      throw new TransactionError(
+        'STALE_REVISION',
+        `Expected revision ${expectedRevision}, found ${existingRelationship.original.revision}`
+      );
+    }
+
+    const snapshot = await readSnapshot(existingRelationship.original);
+    const proposal = await buildDurableInverseProposal(
+      existingRelationship.original,
+      snapshot
+    );
+    const timestamp = this.now();
+    const inverse = this.createProposedTransaction(proposal, timestamp);
+    const inverseEvent: TransactionJournalEventV1 = {
+      schemaVersion: 1,
+      eventId: this.createId(),
+      transactionId: inverse.id,
+      projectId,
+      revision: 0,
+      fromState: null,
+      toState: 'proposed',
+      timestamp,
+      relationship: {
+        kind: 'reverts',
+        transactionId: existingRelationship.original.id,
+      },
+    };
+    const originalEvent: TransactionJournalEventV1 = {
+      schemaVersion: 1,
+      eventId: this.createId(),
+      transactionId: existingRelationship.original.id,
+      projectId,
+      revision: existingRelationship.original.revision + 1,
+      fromState: existingRelationship.original.state,
+      toState: existingRelationship.original.state,
+      timestamp,
+      relationship: {
+        kind: 'reverted-by',
+        transactionId: inverse.id,
+      },
+    };
+    const result = await this.repository.createOrGetRevert(
+      existingRelationship.original.id,
+      expectedRevision,
+      inverse,
+      inverseEvent,
+      originalEvent,
+      proposalFingerprint(proposal)
+    );
+    if (result.created) {
+      const currentText = snapshot.content.slice(
+        result.inverse.target.from,
+        result.inverse.target.to
+      );
+      const inspection = inspectStrictAnchor(result.inverse, snapshot);
+      if (
+        currentText !== result.inverse.expectedText ||
+        !inspection.strictRebaseAvailable ||
+        inspection.range?.from !== result.inverse.target.from
+      ) {
+        const conflicted = await this.inspectConflict(
+          projectId,
+          result.inverse.id,
+          result.inverse.revision,
+          snapshot,
+          currentText !== result.inverse.expectedText
+            ? 'EXPECTED_TEXT_MISMATCH'
+            : 'AMBIGUOUS_ANCHOR'
+        );
+        return {
+          schemaVersion: 1,
+          projectId,
+          original: result.original,
+          inverse: conflicted,
+        };
+      }
+    }
+    return {
+      schemaVersion: 1,
+      projectId,
+      original: result.original,
+      inverse: result.inverse,
+    };
   }
 
   async inspectConflict(
@@ -336,10 +553,16 @@ export class TransactionService {
     expectedRevision: number,
     proposal: ProposeEditTransactionV1
   ): Promise<SupersedeTransactionResultV1> {
-    assertProposal(proposal);
+    const effectiveProposal: ProposeEditTransactionV1 = {
+      ...proposal,
+      ...(original.revertsTransactionId
+        ? { revertsTransactionId: original.revertsTransactionId }
+        : {}),
+    };
+    assertProposal(effectiveProposal);
     if (
-      proposal.projectId !== original.projectId ||
-      proposal.supersedesTransactionId !== original.id
+      effectiveProposal.projectId !== original.projectId ||
+      effectiveProposal.supersedesTransactionId !== original.id
     ) {
       throw new TransactionError(
         'INVALID_REQUEST',
@@ -347,7 +570,10 @@ export class TransactionService {
       );
     }
     const timestamp = this.now();
-    const successor = this.createProposedTransaction(proposal, timestamp);
+    const successor = this.createProposedTransaction(
+      effectiveProposal,
+      timestamp
+    );
     const successorEvent: TransactionJournalEventV1 = {
       schemaVersion: 1,
       eventId: this.createId(),
@@ -376,13 +602,54 @@ export class TransactionService {
         transactionId: successor.id,
       },
     };
+    let revertParent:
+      | {
+          id: string;
+          expectedRevision: number;
+          event: TransactionJournalEventV1;
+        }
+      | undefined;
+    if (original.revertsTransactionId) {
+      const parent = await this.requireTransaction(
+        original.projectId,
+        original.revertsTransactionId
+      );
+      if (
+        parent.state !== 'applied' ||
+        parent.revertedByTransactionId !== original.id
+      ) {
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Inverse parent relationship is not active'
+        );
+      }
+      revertParent = {
+        id: parent.id,
+        expectedRevision: parent.revision,
+        event: {
+          schemaVersion: 1,
+          eventId: this.createId(),
+          transactionId: parent.id,
+          projectId: parent.projectId,
+          revision: parent.revision + 1,
+          fromState: parent.state,
+          toState: parent.state,
+          timestamp,
+          relationship: {
+            kind: 'reverted-by',
+            transactionId: successor.id,
+          },
+        },
+      };
+    }
     const result = await this.repository.supersedeWithSuccessor(
       original.id,
       expectedRevision,
       successor,
       successorEvent,
       originalEvent,
-      proposalFingerprint(proposal)
+      proposalFingerprint(effectiveProposal),
+      revertParent
     );
     return result;
   }
@@ -672,6 +939,31 @@ export class TransactionService {
             ? 'STALE_REVISION'
             : 'INVALID_REQUEST',
           'Selected transaction is not applicable'
+        );
+      }
+    }
+    const inverseMembers = transactions.filter(
+      (transaction) => transaction.revertsTransactionId
+    );
+    if (inverseMembers.length > 0) {
+      if (inverseMembers.length !== 1 || transactions.length !== 1) {
+        throw new TransactionError(
+          'INVALID_STATE',
+          'A durable inverse must be accepted as a singleton selection'
+        );
+      }
+      const inverse = inverseMembers[0];
+      const original = await this.requireTransaction(
+        command.projectId,
+        inverse.revertsTransactionId!
+      );
+      if (
+        original.state !== 'applied' ||
+        original.revertedByTransactionId !== inverse.id
+      ) {
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Inverse relationship is not active'
         );
       }
     }
@@ -983,17 +1275,42 @@ export class TransactionService {
       operation.projectId,
       batch.transactionIds
     );
+    const inverse = transactions.find(
+      (transaction) => transaction.revertsTransactionId
+    );
+    const original = inverse?.revertsTransactionId
+      ? await this.requireTransaction(
+          operation.projectId,
+          inverse.revertsTransactionId
+        )
+      : null;
+    const expectedTransactions = original
+      ? [...transactions, original]
+      : transactions;
     return this.repository.compareAndSwapOperation(
       operation.id,
       operation.revision,
       new Map(
-        transactions.map((transaction) => [
+        expectedTransactions.map((transaction) => [
           transaction.id,
           transaction.revision,
         ])
       ),
       (storedOperation, storedTransactions) => {
         const timestamp = this.now();
+        const storedById = new Map(
+          storedTransactions.map((transaction) => [transaction.id, transaction])
+        );
+        const selectedTransactions = batch.transactionIds.map((id) => {
+          const transaction = storedById.get(id);
+          if (!transaction) {
+            throw new TransactionError(
+              'RECOVERY_REQUIRED',
+              'Selected transaction is missing during atomic completion'
+            );
+          }
+          return transaction;
+        });
         const nextBatches = storedOperation.fileBatches.map((entry) =>
           entry.id === batch.id
             ? {
@@ -1023,28 +1340,80 @@ export class TransactionService {
             timestamp,
             batch.id
           ),
-          transactions: storedTransactions.map((transaction) => {
-            if (transaction.state !== 'applying') {
-              throw new TransactionError(
-                'INVALID_REQUEST',
-                'Selected transaction is not applying'
-              );
-            }
-            const next: EditTransactionV1 = {
-              ...transaction,
-              state: 'applied',
-              revision: transaction.revision + 1,
-              updatedAt: timestamp,
-              appliedAt: timestamp,
-              receipt,
-              pendingApply: undefined,
-              failure: undefined,
-            };
-            return {
-              transaction: next,
-              event: this.transactionEvent(transaction, next, timestamp),
-            };
-          }),
+          transactions: [
+            ...selectedTransactions.map((transaction) => {
+              if (transaction.state !== 'applying') {
+                throw new TransactionError(
+                  'INVALID_REQUEST',
+                  'Selected transaction is not applying'
+                );
+              }
+              const next: EditTransactionV1 = {
+                ...transaction,
+                state: 'applied',
+                revision: transaction.revision + 1,
+                updatedAt: timestamp,
+                appliedAt: timestamp,
+                receipt,
+                pendingApply: undefined,
+                failure: undefined,
+              };
+              return {
+                transaction: next,
+                event: transaction.revertsTransactionId
+                  ? {
+                      ...this.transactionEvent(transaction, next, timestamp),
+                      relationship: {
+                        kind: 'reverts' as const,
+                        transactionId: transaction.revertsTransactionId,
+                      },
+                    }
+                  : this.transactionEvent(transaction, next, timestamp),
+              };
+            }),
+            ...(inverse && original
+              ? [
+                  (() => {
+                    const storedOriginal = storedById.get(original.id);
+                    const storedInverse = storedById.get(inverse.id);
+                    if (
+                      !storedOriginal ||
+                      !storedInverse ||
+                      storedOriginal.state !== 'applied' ||
+                      storedOriginal.revertedByTransactionId !==
+                        storedInverse.id ||
+                      storedInverse.revertsTransactionId !== storedOriginal.id
+                    ) {
+                      throw new TransactionError(
+                        'INVALID_STATE',
+                        'Inverse completion relationship is invalid'
+                      );
+                    }
+                    const nextOriginal: EditTransactionV1 = {
+                      ...storedOriginal,
+                      state: 'reverted',
+                      revision: storedOriginal.revision + 1,
+                      updatedAt: timestamp,
+                      revertedAt: timestamp,
+                    };
+                    return {
+                      transaction: nextOriginal,
+                      event: {
+                        ...this.transactionEvent(
+                          storedOriginal,
+                          nextOriginal,
+                          timestamp
+                        ),
+                        relationship: {
+                          kind: 'reverted-by' as const,
+                          transactionId: storedInverse.id,
+                        },
+                      },
+                    };
+                  })(),
+                ]
+              : []),
+          ],
         };
       }
     );
@@ -1908,18 +2277,7 @@ export class TransactionService {
         applying,
         applying.expectedPostApplySha256 ?? ''
       );
-      return this.transition(
-        projectId,
-        applying.id,
-        applying.revision,
-        'applied',
-        {
-          receipt,
-          pendingApply: undefined,
-          appliedAt: this.now(),
-          failure: undefined,
-        }
-      );
+      return this.completeAppliedTransaction(projectId, applying, receipt);
     } catch (error) {
       if (rawReceipt.success === false) {
         const failure = parseFailedReceiptFailure(rawReceipt, this.now());
@@ -2030,23 +2388,17 @@ export class TransactionService {
           success: true,
           beforeSha256: transaction.baseContentSha256,
           afterSha256: currentSha256,
-          appliedChanges: request.changes.map((change) => ({
-            transactionId: change.transactionId,
-            from: change.from,
-            to: change.to,
-            oldText: change.expectedText,
-            newText: change.replacementText,
-          })),
+          appliedChanges: projectAppliedChanges(request.changes),
         },
         request,
         transaction,
         transaction.expectedPostApplySha256
       );
-      return this.recoveryTransition(transaction, 'applied', {
-        pendingApply: undefined,
-        appliedAt: this.now(),
-        receipt,
-      });
+      return this.completeAppliedTransaction(
+        transaction.projectId,
+        transaction,
+        receipt
+      );
     }
     const failure = sanitizeFailure('RECOVERY_REQUIRED', this.now());
     return this.recoveryTransition(
@@ -2092,6 +2444,136 @@ export class TransactionService {
         };
       }
     );
+  }
+
+  private async completeAppliedTransaction(
+    projectId: string,
+    applying: EditTransactionV1,
+    receipt: ApplyEditBatchReceiptV1
+  ): Promise<EditTransactionV1> {
+    if (!applying.revertsTransactionId) {
+      return this.transition(
+        projectId,
+        applying.id,
+        applying.revision,
+        'applied',
+        {
+          receipt,
+          pendingApply: undefined,
+          appliedAt: this.now(),
+          failure: undefined,
+        }
+      );
+    }
+    const original = await this.requireTransaction(
+      projectId,
+      applying.revertsTransactionId
+    );
+    try {
+      const completed = await this.repository.compareAndSwapTransactions(
+        new Map([
+          [applying.id, applying.revision],
+          [original.id, original.revision],
+        ]),
+        (storedTransactions) => {
+          const storedById = new Map(
+            storedTransactions.map((transaction) => [
+              transaction.id,
+              transaction,
+            ])
+          );
+          const storedInverse = storedById.get(applying.id);
+          const storedOriginal = storedById.get(original.id);
+          if (
+            !storedInverse ||
+            !storedOriginal ||
+            storedInverse.state !== 'applying' ||
+            storedInverse.revertsTransactionId !== storedOriginal.id ||
+            storedOriginal.state !== 'applied' ||
+            storedOriginal.revertedByTransactionId !== storedInverse.id
+          ) {
+            throw new TransactionError(
+              'INVALID_STATE',
+              'Inverse completion relationship is invalid'
+            );
+          }
+          const timestamp = this.now();
+          const nextInverse: EditTransactionV1 = {
+            ...storedInverse,
+            state: 'applied',
+            revision: storedInverse.revision + 1,
+            updatedAt: timestamp,
+            appliedAt: timestamp,
+            receipt,
+            pendingApply: undefined,
+            failure: undefined,
+          };
+          const nextOriginal: EditTransactionV1 = {
+            ...storedOriginal,
+            state: 'reverted',
+            revision: storedOriginal.revision + 1,
+            updatedAt: timestamp,
+            revertedAt: timestamp,
+          };
+          return {
+            transactions: [
+              {
+                transaction: nextInverse,
+                event: {
+                  ...this.transactionEvent(
+                    storedInverse,
+                    nextInverse,
+                    timestamp
+                  ),
+                  relationship: {
+                    kind: 'reverts',
+                    transactionId: storedOriginal.id,
+                  },
+                },
+              },
+              {
+                transaction: nextOriginal,
+                event: {
+                  ...this.transactionEvent(
+                    storedOriginal,
+                    nextOriginal,
+                    timestamp
+                  ),
+                  relationship: {
+                    kind: 'reverted-by',
+                    transactionId: storedInverse.id,
+                  },
+                },
+              },
+            ],
+          };
+        }
+      );
+      return completed.find((transaction) => transaction.id === applying.id)!;
+    } catch (error) {
+      if (
+        error instanceof TransactionError &&
+        error.code === 'STALE_REVISION'
+      ) {
+        const currentInverse = await this.requireTransaction(
+          projectId,
+          applying.id
+        );
+        const currentOriginal = await this.requireTransaction(
+          projectId,
+          original.id
+        );
+        if (
+          currentInverse.state === 'applied' &&
+          currentInverse.receipt?.success === true &&
+          currentOriginal.state === 'reverted' &&
+          currentOriginal.revertedByTransactionId === currentInverse.id
+        ) {
+          return currentInverse;
+        }
+      }
+      throw error;
+    }
   }
 
   private async requireTransaction(

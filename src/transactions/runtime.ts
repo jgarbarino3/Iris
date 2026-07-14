@@ -142,6 +142,43 @@ export function createTransactionRuntimeHandler(
           );
           break;
         }
+        case 'getRevertRelationship': {
+          const scoped = parseProjectScopedIdPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.getRevertRelationship(
+            scoped.projectId,
+            scoped.id
+          );
+          break;
+        }
+        case 'inspectRevertEligibility': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          result = await dependencies.service.inspectRevertEligibility(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision
+          );
+          break;
+        }
+        case 'createRevert': {
+          const scoped = parseRevisionScopedPayload(payload);
+          enforceRuntimeProjectScope(scoped.projectId, context);
+          if (!dependencies.readConflictSnapshot) {
+            throw new TransactionError(
+              'EDITOR_UNAVAILABLE',
+              'Exact-file snapshot reader unavailable'
+            );
+          }
+          result = await dependencies.service.createRevert(
+            scoped.projectId,
+            scoped.id,
+            scoped.expectedRevision,
+            (transaction) =>
+              dependencies.readConflictSnapshot!(transaction, context)
+          );
+          break;
+        }
         case 'list': {
           const query = parseListPayload(payload);
           enforceRuntimeProjectScope(query.projectId, context);

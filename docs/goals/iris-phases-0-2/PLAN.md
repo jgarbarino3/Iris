@@ -30,6 +30,8 @@ Freeze the product, ownership, interfaces, cutover ledger, issue order, test sea
 7. Make review cards projections of transactions and remove displaced writers.
 8. Pass deterministic browser and live Overleaf acceptance.
 
+**P2-07A checkpoint:** the durable inverse-transaction and atomic-revert core is implemented without recent-history retrieval, export, retention, or P2-08 writer removal. P2-07 remains active for P2-07B+C.
+
 ## Test seams
 
 - **Pure contracts:** Node tests for schemas, state transitions, anchors, overlap detection, batching, compensation, migration, and retention.

@@ -51,6 +51,19 @@ export type AtomicSupersedeResultV1 = {
   successor: EditTransactionV1;
 };
 
+export type AtomicRevertCreationResultV1 = {
+  original: EditTransactionV1;
+  inverse: EditTransactionV1;
+  created: boolean;
+};
+
+export type AtomicTransactionUpdateV1 = {
+  transactions: Array<{
+    transaction: EditTransactionV1;
+    event: TransactionJournalEventV1;
+  }>;
+};
+
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -324,7 +337,12 @@ export class IndexedDbTransactionRepository {
     successor: EditTransactionV1,
     successorEvent: TransactionJournalEventV1,
     originalEvent: TransactionJournalEventV1,
-    proposalFingerprint: string
+    proposalFingerprint: string,
+    revertParent?: {
+      id: string;
+      expectedRevision: number;
+      event: TransactionJournalEventV1;
+    }
   ): Promise<AtomicSupersedeResultV1> {
     const compositeKey = composeIdempotencyKey(
       successor.projectId,
@@ -355,13 +373,85 @@ export class IndexedDbTransactionRepository {
         idbTransaction.abort();
         throw new TransactionError('WRONG_PROJECT', 'Project mismatch');
       }
+      let parent: EditTransactionV1 | undefined;
+      if (original.revertsTransactionId) {
+        if (
+          !revertParent ||
+          revertParent.id !== original.revertsTransactionId ||
+          successor.revertsTransactionId !== original.revertsTransactionId
+        ) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'INVALID_STATE',
+            'Inverse successor relationship is incomplete'
+          );
+        }
+        parent = await requestResult(
+          transactions.get(revertParent.id) as IDBRequest<
+            EditTransactionV1 | undefined
+          >
+        );
+        if (
+          !parent ||
+          parent.projectId !== original.projectId ||
+          parent.state !== 'applied'
+        ) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'INVALID_STATE',
+            'Inverse parent is not actively applied'
+          );
+        }
+      } else if (revertParent || successor.revertsTransactionId) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Unexpected inverse successor relationship'
+        );
+      }
+
+      const relinkParent = (successorId: string): void => {
+        if (!parent || !revertParent) return;
+        if (parent.revertedByTransactionId === successorId) return;
+        if (parent.revertedByTransactionId !== original.id) {
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Inverse parent points to a competing transaction'
+          );
+        }
+        if (parent.revision !== revertParent.expectedRevision) {
+          throw new TransactionError(
+            'STALE_REVISION',
+            `Expected revision ${revertParent.expectedRevision}, found ${parent.revision}`
+          );
+        }
+        const nextParent: EditTransactionV1 = {
+          ...parent,
+          revertedByTransactionId: successorId,
+          revision: parent.revision + 1,
+          updatedAt: revertParent.event.timestamp,
+        };
+        transactions.put(nextParent);
+        journal.add({
+          ...revertParent.event,
+          transactionId: nextParent.id,
+          projectId: nextParent.projectId,
+          revision: nextParent.revision,
+          fromState: parent.state,
+          toState: parent.state,
+          relationship: {
+            kind: 'reverted-by',
+            transactionId: successorId,
+          },
+        });
+        parent = nextParent;
+      };
       if (original.supersededByTransactionId) {
         const authoritative = await requestResult(
           transactions.get(original.supersededByTransactionId) as IDBRequest<
             EditTransactionV1 | undefined
           >
         );
-        await transactionDone(idbTransaction);
         if (
           !authoritative ||
           authoritative.supersedesTransactionId !== original.id
@@ -371,6 +461,8 @@ export class IndexedDbTransactionRepository {
             'Supersede relationship is incomplete'
           );
         }
+        relinkParent(authoritative.id);
+        await transactionDone(idbTransaction);
         return { original, successor: authoritative };
       }
       if (original.revision !== expectedOriginalRevision) {
@@ -436,6 +528,7 @@ export class IndexedDbTransactionRepository {
             transactionId: existingSuccessor.id,
           },
         });
+        relinkParent(existingSuccessor.id);
         await transactionDone(idbTransaction);
         return { original: nextOriginal, successor: existingSuccessor };
       }
@@ -469,6 +562,7 @@ export class IndexedDbTransactionRepository {
           transactionId: successor.id,
         },
       });
+      relinkParent(successor.id);
       await transactionDone(idbTransaction);
       return { original: nextOriginal, successor };
     } catch (error) {
@@ -489,6 +583,203 @@ export class IndexedDbTransactionRepository {
           return {
             original: recoveredOriginal,
             successor: recoveredSuccessor,
+          };
+        }
+      }
+      throw error;
+    }
+  }
+
+  async createOrGetRevert(
+    originalId: string,
+    expectedOriginalRevision: number,
+    inverse: EditTransactionV1,
+    inverseEvent: TransactionJournalEventV1,
+    originalEvent: TransactionJournalEventV1,
+    proposalFingerprint: string
+  ): Promise<AtomicRevertCreationResultV1> {
+    const compositeKey = composeIdempotencyKey(
+      inverse.projectId,
+      inverse.idempotencyKey
+    );
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [TRANSACTIONS_STORE, JOURNAL_STORE, IDEMPOTENCY_STORE],
+      'readwrite'
+    );
+    const transactions = idbTransaction.objectStore(TRANSACTIONS_STORE);
+    const journal = idbTransaction.objectStore(JOURNAL_STORE);
+    const idempotency = idbTransaction.objectStore(IDEMPOTENCY_STORE);
+    try {
+      const original = await requestResult(
+        transactions.get(originalId) as IDBRequest<
+          EditTransactionV1 | undefined
+        >
+      );
+      if (!original) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          `Unknown transaction ${originalId}`
+        );
+      }
+      if (
+        original.projectId !== inverse.projectId ||
+        inverse.revertsTransactionId !== original.id
+      ) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          original.projectId !== inverse.projectId
+            ? 'WRONG_PROJECT'
+            : 'INVALID_REQUEST',
+          'Inverse relationship is invalid'
+        );
+      }
+      if (
+        original.id === inverse.id ||
+        original.revertsTransactionId ||
+        inverse.revertedByTransactionId
+      ) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Revert relationship would create a cycle'
+        );
+      }
+      if (original.revertedByTransactionId) {
+        const authoritative = await requestResult(
+          transactions.get(original.revertedByTransactionId) as IDBRequest<
+            EditTransactionV1 | undefined
+          >
+        );
+        await transactionDone(idbTransaction);
+        if (
+          !authoritative ||
+          authoritative.projectId !== original.projectId ||
+          authoritative.revertsTransactionId !== original.id
+        ) {
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Revert relationship is incomplete'
+          );
+        }
+        return { original, inverse: authoritative, created: false };
+      }
+      if (original.revision !== expectedOriginalRevision) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'STALE_REVISION',
+          `Expected revision ${expectedOriginalRevision}, found ${original.revision}`
+        );
+      }
+      if (original.state !== 'applied') {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_STATE',
+          'Only an applied transaction can create an inverse'
+        );
+      }
+
+      const existingIdempotency = await requestResult(
+        idempotency.get(compositeKey) as IDBRequest<
+          IdempotencyRecord | undefined
+        >
+      );
+      if (existingIdempotency) {
+        if (existingIdempotency.proposalFingerprint !== proposalFingerprint) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'INVALID_REQUEST',
+            'Idempotency key reused with different inverse content'
+          );
+        }
+        const existingInverse = await requestResult(
+          transactions.get(existingIdempotency.transactionId) as IDBRequest<
+            EditTransactionV1 | undefined
+          >
+        );
+        if (
+          !existingInverse ||
+          existingInverse.projectId !== original.projectId ||
+          existingInverse.revertsTransactionId !== original.id
+        ) {
+          idbTransaction.abort();
+          throw new TransactionError(
+            'RECOVERY_REQUIRED',
+            'Inverse idempotency relationship is incomplete'
+          );
+        }
+        const timestamp = originalEvent.timestamp;
+        const nextOriginal: EditTransactionV1 = {
+          ...original,
+          revertedByTransactionId: existingInverse.id,
+          revision: original.revision + 1,
+          updatedAt: timestamp,
+        };
+        transactions.put(nextOriginal);
+        journal.add({
+          ...originalEvent,
+          revision: nextOriginal.revision,
+          fromState: original.state,
+          toState: original.state,
+          relationship: {
+            kind: 'reverted-by',
+            transactionId: existingInverse.id,
+          },
+        });
+        await transactionDone(idbTransaction);
+        return {
+          original: nextOriginal,
+          inverse: existingInverse,
+          created: false,
+        };
+      }
+
+      const nextOriginal: EditTransactionV1 = {
+        ...original,
+        revertedByTransactionId: inverse.id,
+        revision: original.revision + 1,
+        updatedAt: originalEvent.timestamp,
+      };
+      transactions.add(inverse);
+      journal.add(inverseEvent);
+      idempotency.add({
+        key: compositeKey,
+        projectId: inverse.projectId,
+        idempotencyKey: inverse.idempotencyKey,
+        proposalFingerprint,
+        transactionId: inverse.id,
+      } as IdempotencyRecord);
+      transactions.put(nextOriginal);
+      journal.add({
+        ...originalEvent,
+        revision: nextOriginal.revision,
+        fromState: original.state,
+        toState: original.state,
+        relationship: {
+          kind: 'reverted-by',
+          transactionId: inverse.id,
+        },
+      });
+      await transactionDone(idbTransaction);
+      return { original: nextOriginal, inverse, created: true };
+    } catch (error) {
+      try {
+        await transactionDone(idbTransaction);
+      } catch {
+        // Constraint races are resolved from the authoritative original link.
+      }
+      if (error instanceof TransactionError) throw error;
+      const recoveredOriginal = await this.get(originalId);
+      if (recoveredOriginal?.revertedByTransactionId) {
+        const recoveredInverse = await this.get(
+          recoveredOriginal.revertedByTransactionId
+        );
+        if (recoveredInverse?.revertsTransactionId === recoveredOriginal.id) {
+          return {
+            original: recoveredOriginal,
+            inverse: recoveredInverse,
+            created: false,
           };
         }
       }
@@ -759,6 +1050,75 @@ export class IndexedDbTransactionRepository {
     idbTransaction.objectStore(JOURNAL_STORE).add(next.event);
     await transactionDone(idbTransaction);
     return next.transaction;
+  }
+
+  async compareAndSwapTransactions(
+    expectedRevisions: Map<string, number>,
+    update: (transactions: EditTransactionV1[]) => AtomicTransactionUpdateV1
+  ): Promise<EditTransactionV1[]> {
+    if (expectedRevisions.size === 0) {
+      throw new TransactionError(
+        'INVALID_REQUEST',
+        'Atomic transaction update cannot be empty'
+      );
+    }
+    const database = await this.open();
+    const idbTransaction = database.transaction(
+      [TRANSACTIONS_STORE, JOURNAL_STORE],
+      'readwrite'
+    );
+    const store = idbTransaction.objectStore(TRANSACTIONS_STORE);
+    const current: EditTransactionV1[] = [];
+    for (const [id, expectedRevision] of expectedRevisions) {
+      const transaction = await requestResult(
+        store.get(id) as IDBRequest<EditTransactionV1 | undefined>
+      );
+      if (!transaction) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'INVALID_REQUEST',
+          `Unknown transaction ${id}`
+        );
+      }
+      if (transaction.revision !== expectedRevision) {
+        idbTransaction.abort();
+        throw new TransactionError(
+          'STALE_REVISION',
+          `Expected revision ${expectedRevision}, found ${transaction.revision}`
+        );
+      }
+      current.push(transaction);
+    }
+    const next = update(current);
+    const expectedIds = new Set(expectedRevisions.keys());
+    if (
+      next.transactions.length !== expectedIds.size ||
+      new Set(next.transactions.map((entry) => entry.transaction.id)).size !==
+        expectedIds.size
+    ) {
+      idbTransaction.abort();
+      throw new Error('Atomic transaction update membership mismatch');
+    }
+    const currentById = new Map(
+      current.map((transaction) => [transaction.id, transaction])
+    );
+    for (const entry of next.transactions) {
+      const previous = currentById.get(entry.transaction.id);
+      if (
+        !previous ||
+        !expectedIds.has(entry.transaction.id) ||
+        entry.transaction.revision !== previous.revision + 1 ||
+        entry.event.transactionId !== entry.transaction.id ||
+        entry.event.revision !== entry.transaction.revision
+      ) {
+        idbTransaction.abort();
+        throw new Error('Atomic transaction revision or event mismatch');
+      }
+      store.put(entry.transaction);
+      idbTransaction.objectStore(JOURNAL_STORE).add(entry.event);
+    }
+    await transactionDone(idbTransaction);
+    return next.transactions.map((entry) => entry.transaction);
   }
 
   async deleteDatabase(): Promise<void> {

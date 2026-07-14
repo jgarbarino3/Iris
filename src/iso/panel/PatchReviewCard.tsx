@@ -169,6 +169,8 @@ export function PatchReviewCard({
     title = 'Legacy edit · Unverified history';
   } else if (patchReview.projection?.mode === 'migration-error') {
     title = 'Edit history · Unavailable';
+  } else if (patchReview.projection?.transactionState === 'reverted') {
+    title = 'Review changes · Reverted';
   } else if (status === 'accepted') {
     title = 'Review changes · Accepted';
   } else if (status === 'rejected') {

@@ -22,6 +22,7 @@ export const TRANSACTION_ERROR_CODES = [
   'APPLY_FAILED',
   'CANCELLED_BEFORE_DISPATCH',
   'STALE_REVISION',
+  'INVALID_STATE',
   'RECOVERY_REQUIRED',
 ] as const;
 
@@ -41,6 +42,7 @@ export const FAILURE_MESSAGES: Record<TransactionErrorCode, string> = {
   APPLY_FAILED: 'Editor apply failed',
   CANCELLED_BEFORE_DISPATCH: 'Apply was cancelled before editor dispatch',
   STALE_REVISION: 'Transaction revision is stale',
+  INVALID_STATE: 'Transaction is not in a valid state for this operation',
   RECOVERY_REQUIRED: 'Manual recovery is required',
 };
 export type EditTransactionState =
@@ -186,6 +188,37 @@ export type EditTransactionV1 = {
   revertedByTransactionId?: string;
 };
 
+export type RevertEligibilityReasonV1 =
+  | 'ELIGIBLE'
+  | 'RETURN_EXISTING_INVERSE'
+  | 'NOT_APPLIED'
+  | 'MISSING_SUCCESS_RECEIPT'
+  | 'MALFORMED_SUCCESS_RECEIPT'
+  | 'RECEIPT_TRANSACTION_MISMATCH'
+  | 'RECEIPT_RANGE_MISMATCH'
+  | 'RECEIPT_TEXT_MISMATCH'
+  | 'RECEIPT_HASH_MISMATCH'
+  | 'ALREADY_REVERTED'
+  | 'RELATIONSHIP_INCOMPLETE'
+  | 'RELATIONSHIP_CYCLE';
+
+export type RevertEligibilityV1 = {
+  schemaVersion: 1;
+  projectId: string;
+  transactionId: string;
+  eligible: boolean;
+  disposition: 'create' | 'return-existing' | 'deny';
+  reason: RevertEligibilityReasonV1;
+  inverseTransactionId?: string;
+};
+
+export type RevertRelationshipV1 = {
+  schemaVersion: 1;
+  projectId: string;
+  original: EditTransactionV1;
+  inverse?: EditTransactionV1;
+};
+
 export type FileBatchStateV1 =
   | 'proposed'
   | 'preflighted'
@@ -301,7 +334,7 @@ export type TransactionJournalEventV1 = {
   timestamp: number;
   failure?: TransactionFailureV1;
   relationship?: {
-    kind: 'supersedes' | 'superseded-by';
+    kind: 'supersedes' | 'superseded-by' | 'reverts' | 'reverted-by';
     transactionId: string;
   };
 };
@@ -349,6 +382,9 @@ export type TransactionRuntimeActionV1 =
   | 'retarget'
   | 'supersedeProposal'
   | 'getSuccessor'
+  | 'inspectRevertEligibility'
+  | 'createRevert'
+  | 'getRevertRelationship'
   | 'reconcile'
   | 'cancel';
 

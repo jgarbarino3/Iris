@@ -441,13 +441,21 @@ export function projectTransactionPatchReview(
             'Edit has no trustworthy persisted receipt',
         }
       : {}),
-    ...(operationProjection.outcome
+    ...(transaction.state === 'reverted'
+      ? { transactionOutcome: 'reverted' as const }
+      : operationProjection.outcome
       ? { transactionOutcome: operationProjection.outcome }
       : {}),
     ...(operation ? { operationId: operation.id } : {}),
     ...(transaction.conflict ? { conflictPreview: transaction.conflict } : {}),
     ...(transaction.supersedesTransactionId
       ? { successorTransactionId: transaction.id }
+      : {}),
+    ...(transaction.revertedByTransactionId
+      ? { inverseTransactionId: transaction.revertedByTransactionId }
+      : {}),
+    ...(transaction.revertsTransactionId
+      ? { revertsTransactionId: transaction.revertsTransactionId }
       : {}),
     projection,
   };
