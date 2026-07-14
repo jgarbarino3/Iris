@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import { normalizeToolInput, extractToolDisplayInfo, MAX_TOOL_DISPLAY_LEN } from '../../toolDisplayInfo.js';
 import type { JobEvent } from '../../types.js';
 import { buildAttachmentBlock, getAttachmentLimits } from '../../attachments/textAttachments.js';
+import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
 import {
   buildDocumentAttachmentBlock,
   type DocumentAttachmentEntry,
@@ -894,6 +896,8 @@ function buildPrompt(
     action === 'chat' || action === 'notation_draft_fixes'
       ? patchGuidance
       : '',
+    action === 'chat' ? AUTOMATIC_PLACEMENT_GUIDANCE : '',
+    action === 'chat' ? COMPILE_FIX_GUIDANCE : '',
     action === 'chat' ? selectionPatchGuidance : '',
     `Action: ${action}`,
     contextSection,

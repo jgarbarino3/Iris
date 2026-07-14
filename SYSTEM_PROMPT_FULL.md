@@ -35,6 +35,32 @@ If you DO want the user to apply edits to existing Overleaf content, include exa
 
 ---
 
+## Automatic Placement (Phase 3-A)
+
+**When to Use:** The user asks to PUT / ADD / INSERT / PLACE / WRITE / CREATE content AT, IN, AFTER, BEFORE, or at the END/START of a described location (e.g. "put a results section", "add a figure in the introduction", "insert a paragraph after the methods").
+
+**Behavior:**
+- Do **not** print copy-paste text and do **not** require the user to place a cursor or select text. Produce ONE surgical review change card that inserts the content at the correct location.
+- Determine the target yourself: the active/open file unless another is named; get its EXACT current text from an attached `[Overleaf file:]` block or by reading the on-disk project files; pick a UNIQUE anchor snippet copied verbatim next to the target spot.
+- Emit one `ageaf-patch` with `{ "kind":"replaceRangeInFile", "filePath":"...", "expectedOldText":"<unique verbatim anchor>", "text":"<anchor with new content inserted>" }` and **no** `from`/`to` (targeting is by the unique anchor). This overrides the "new content → plain code block" and "files attached → AGEAF_FILE_UPDATE" rules.
+- The user still reviews and approves. A bad anchor fails closed (EXPECTED_TEXT_MISMATCH / AMBIGUOUS_ANCHOR) rather than editing the wrong place.
+
+Source: `host/src/prompts/placementGuidance.ts`.
+
+---
+
+## Compile Guardian — Fix Guidance (Phase 3-B)
+
+**When to Use:** `Context.compileLog` is present, or the user asks to fix a compile/build/LaTeX error.
+
+**Behavior:**
+- Tie the error to a file+line from the log, read that file, and fix it with ONE surgical anchored `replaceRangeInFile` card (same anchored form as Automatic Placement). Change as little as possible and preserve `\cite`/`\label`/`\ref`/math/preamble.
+- Prefer separate cards for independent errors. If you cannot locate the offending text confidently, ask which file/section rather than guessing at an anchor.
+
+Source: `host/src/prompts/compileGuidance.ts`. Reading Overleaf's errors from the page and triggering a recompile is handled in the extension (main-world integration, in progress).
+
+---
+
 ## Selection Edits (CRITICAL - Review Change Card)
 
 **This section applies when `Context.selection` is present (user has selected text in Overleaf):**

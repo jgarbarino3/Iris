@@ -16,6 +16,8 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { buildReplaceRangePatchesFromFileUpdates } from '../../patch/fileUpdate.js';
 import { sendCompactCommand } from '../../compaction/sendCompact.js';
 import { getClaudeSessionCwd } from './cwd.js';
+import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
 
 type EmitEvent = (event: JobEvent) => void;
 
@@ -376,7 +378,7 @@ If asked about the model/runtime, use this note and do not guess.`;
     'Patch proposals (Review Change Cards):',
     '- Use an `ageaf-patch` block when the user wants to modify existing Overleaf content (rewrite/edit selection, fix LaTeX errors, etc).',
     '- If the user is asking for general info or standalone writing (e.g. an abstract draft, explanation, ideas), do NOT emit `ageaf-patch` — put the full answer directly in the visible response.',
-    '- If you are writing NEW content (not editing existing), prefer a normal fenced code block (e.g. ```tex).',
+    '- If you are writing NEW content (not editing existing), prefer a normal fenced code block (e.g. ```tex) — EXCEPT when the user is asking to place/insert that content somewhere in the document (see "Automatic placement").',
     '- If you DO want the user to apply edits to existing Overleaf content, include exactly one fenced code block labeled `ageaf-patch` containing ONLY a JSON object matching one of:',
     '  - { "kind":"replaceSelection", "text":"..." } — Use when editing selected text',
     '  - { "kind":"replaceRangeInFile", "filePath":"main.tex", "expectedOldText":"...", "text":"...", "from":123, "to":456 } — Use for file-level edits',
@@ -388,8 +390,8 @@ If asked about the model/runtime, use this note and do not guess.`;
 
   const patchGuidanceWithFiles = [
     'Patch proposals (Review Change Cards):',
-    '- CRITICAL: When `[Overleaf file: <path>]` blocks are present, ALWAYS use `AGEAF_FILE_UPDATE` markers (see "Overleaf file edits" below) for ALL edits to those files.',
-    '- Do NOT use `ageaf-patch` with `replaceRangeInFile` when file blocks are present — always use `AGEAF_FILE_UPDATE` instead.',
+    '- CRITICAL: When `[Overleaf file: <path>]` blocks are present, use `AGEAF_FILE_UPDATE` markers (see "Overleaf file edits" below) for whole-file or multi-part edits to those files.',
+    '- Do NOT use `ageaf-patch` with `replaceRangeInFile` for general edits when file blocks are present — use `AGEAF_FILE_UPDATE` instead. EXCEPTION: for placement/insertion intent, use the anchored `replaceRangeInFile` card described in "Automatic placement".',
     '- You MAY use `ageaf-patch` with { "kind":"replaceSelection", "text":"..." } ONLY when editing cursor-selected text (`Context.selection`).',
     '- You MAY use `ageaf-patch` with { "kind":"insertAtCursor", "text":"..." } ONLY when explicitly asked to insert at cursor.',
     '- If the user is asking for general info or standalone writing, do NOT emit patches — put the full answer directly in the visible response.',
@@ -481,6 +483,8 @@ If asked about the model/runtime, use this note and do not guess.`;
     'You are Ageaf, a concise Overleaf assistant.',
     responseGuidance,
     patchGuidance,
+    AUTOMATIC_PLACEMENT_GUIDANCE,
+    COMPILE_FIX_GUIDANCE,
     selectionPatchGuidance,
     hasOverleafFileBlocks ? fileUpdateGuidance : '',
     greetingMode ? greetingGuidance : 'If the user message is not a greeting, respond normally but stay concise.',

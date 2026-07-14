@@ -1,3 +1,6 @@
+import { AUTOMATIC_PLACEMENT_GUIDANCE } from '../../prompts/placementGuidance.js';
+import { COMPILE_FIX_GUIDANCE } from '../../prompts/compileGuidance.js';
+
 export type PiPromptInput = {
   action: string;
   contextForPrompt: Record<string, unknown> | null;
@@ -112,6 +115,8 @@ export function buildPiSystemPrompt(input: PiPromptInput): string {
     responseGuidance,
     toolsGuidance ?? '',
     patchGuidance,
+    AUTOMATIC_PLACEMENT_GUIDANCE,
+    COMPILE_FIX_GUIDANCE,
     selectionPatchGuidance,
     hasOverleafFileBlocks ? fileUpdateGuidance : '',
     greetingMode ? greetingGuidance : 'If the user message is not a greeting, respond normally but stay concise.',
