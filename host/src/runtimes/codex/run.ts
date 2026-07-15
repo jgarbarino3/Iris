@@ -193,11 +193,28 @@ function getContextForPrompt(
     };
     pickString('message');
     pickString('selection');
+    pickString('activeFile');
+    pickString('activeFileId');
 
     // Only send surrounding context if limit > 0
     if (limit > 0) {
       pickString('surroundingBefore', 'start'); // Keep end of "before" (closest to cursor)
       pickString('surroundingAfter', 'end');    // Keep start of "after" (closest to cursor)
+    }
+
+    if (Array.isArray(raw.uploadedImages)) {
+      const uploaded = raw.uploadedImages
+        .filter(
+          (entry): entry is { name?: unknown; fileName: string } =>
+            !!entry &&
+            typeof entry === 'object' &&
+            typeof (entry as { fileName?: unknown }).fileName === 'string'
+        )
+        .map((entry) => ({
+          ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+          fileName: entry.fileName,
+        }));
+      if (uploaded.length > 0) base.uploadedImages = uploaded;
     }
   }
 
