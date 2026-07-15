@@ -79,7 +79,23 @@ function findOutputLogUrl(data: any): string | null {
   const logFile =
     files.find((f) => f && /(^|\/)output\.log$/.test(String(f.path || ''))) ||
     files.find((f) => f && String(f.type || '') === 'log');
-  return logFile && typeof logFile.url === 'string' ? logFile.url : null;
+  const baseUrl =
+    logFile && typeof logFile.url === 'string' ? logFile.url : null;
+  if (!baseUrl) return null;
+  // Overleaf only serves output files when the request carries the compile
+  // server id (and build/group). Without it the URL 404s.
+  const params: string[] = [];
+  const clsi = data.clsiServerId ?? data.clsiserverid ?? logFile.clsiServerId;
+  if (clsi) params.push(`clsiserverid=${encodeURIComponent(String(clsi))}`);
+  const group = data.compileGroup;
+  if (group) params.push(`compileGroup=${encodeURIComponent(String(group))}`);
+  const build = logFile.build ?? data.buildId;
+  if (build && !/[?&]build=/.test(baseUrl)) {
+    params.push(`build=${encodeURIComponent(String(build))}`);
+  }
+  if (params.length === 0) return baseUrl;
+  const sep = baseUrl.includes('?') ? '&' : '?';
+  return baseUrl + sep + params.join('&');
 }
 
 function publishFromCompileResponse(data: any): void {
