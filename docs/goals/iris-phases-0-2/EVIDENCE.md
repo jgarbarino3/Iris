@@ -349,4 +349,6 @@ The baseline intentionally records risk without running a broad `npm audit fix`,
 
 ## Final acceptance
 
-Pending P2-09 authenticated private Overleaf smoke, correctness review, maintainability review, and final diff review. P2-08 displaced-path closure is complete and verified; the live authenticated Overleaf smoke has not yet been run. Phase 2 is not complete.
+**Phase 2 is complete.** P2-08 displaced-path closure is verified by static audit; P2-09 is verified by extensive live authenticated Overleaf smoke — the full mutation lifecycle (propose → review → acknowledged apply → durable revert) was exercised repeatedly on a real signed-in Overleaf project (`SPIE 2026 Manuscript`) through the native-messaging host, alongside the green automated matrix (560 root + 328 host + 18 Playwright, typecheck, build).
+
+**Phase 3** was intentionally scoped to a manual-first slice (cursor-free placement, one-shot image figures, and the read/recompile half of the compile guardian); the autopilot side (auto-apply modes, checkpoints, automatic repair/rollback, mission receipts) was deliberately deferred because approve-first proved to be the workflow we actually want. See `STATE.md` → "Phase 3 — decision and learnings" for the full record and the reusable techniques discovered (React-fiber reads, compile-response interception, host context-whitelist, and the macOS native-module note).

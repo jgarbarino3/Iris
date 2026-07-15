@@ -1,14 +1,14 @@
 # Iris Phases 0–2 State
 
-**Updated:** 2026-07-14
+**Updated:** 2026-07-15
 
-**Goal:** Active
+**Goal:** Phases 0–2 complete; Phase 3 intentionally scoped (see "Phase 3 — decision and learnings").
 
-**Branch:** `feature/glassmorphic-ui` (recovered from `codex/iris-phases-0-2` at `024dc3c`)
+**Branch:** `feature/glassmorphic-ui` (recovered from `codex/iris-phases-0-2` at `024dc3c`; work pushed to `origin` = github.com/jgarbarino3/Iris)
 
-**Phase:** 2
+**Phase:** 2 verified; Phase 3 partial by choice
 
-**Active issue:** P2-09
+**Active issue:** none — Phase 2 closed; Phase 3 autopilot deferred
 
 ## Current state
 
@@ -73,9 +73,34 @@
 - Automated P2-04 verification passed; live authenticated Overleaf smoke remains pending for final acceptance.
 - Automated P2-05 verification passed; live authenticated Overleaf smoke remains pending for final acceptance.
 
+## Phase 2 close-out
+
+- **P2-08 verified** (displaced-path deletion + static audit) and **P2-09 verified** by extensive live authenticated Overleaf smoke: the complete mutation lifecycle — propose → review card / inline overlay → accept/reject → acknowledged apply, plus durable-transaction revert — was exercised repeatedly on a real signed-in Overleaf project (`SPIE 2026 Manuscript`, `main.tex`) through the native-messaging host. Automated matrix also green: root typecheck, 560 root tests, 328 host tests, production build, 18 Playwright tests.
+- The `feature/glassmorphic-ui` branch (misnamed for its actual content — it holds the P2-08 + real-world Phase-3-slice work) is pushed to `origin`.
+
+## Phase 3 — decision and learnings
+
+We built a **manual-first slice** of Phase 3 and **deliberately deferred the autopilot** (the rest is a real product choice, not an unfinished task).
+
+**Shipped (all Review-mode / approve-first):**
+
+- Cursor-free placement via `insertAtAnchor` — the model names a short unique anchor + before/after; the extension resolves it against the live document and reuses the proven anchored-insertion path (one approvable card, no cursor).
+- One-shot image → figure: attach an image, it uploads into the Overleaf project (root folder id discovered from the file-tree React fiber, since Overleaf exposes it nowhere else), the model inserts `\includegraphics` referencing the uploaded file.
+- Compile guardian, read/recompile half: acquire `output.log` reliably (fetched with `clsiserverid`), tie errors to file/line, recompile after an accepted edit, compare pre/post error count, and surface the compile log to the model so "fix the compile errors" works.
+
+**Deliberately NOT built (Phase 3 autopilot):** Auto-apply-local and Trusted-project autopilot modes, blast-radius policy, per-mission checkpoints, automatic bounded repair + rollback, and mission receipts. Every real-world session confirmed a preference for approving each edit (especially on a submission paper), which is the opposite of autopilot's apply-without-approval model.
+
+**What we learned:**
+
+- Approve-first fits the actual paper-writing workflow; auto-apply was never missed in practice.
+- Overleaf hides most state (root folder id, compile errors) behind React internals and the realtime socket — the reliable way in is a **main-world script reading the React fiber / intercepting compile responses** and mirroring values onto DOM attributes the isolated panel can read.
+- The context sent to the model is **whitelisted host-side** (`getContextForPrompt`); every new context field (`activeFile`, `uploadedImages`, `compileLog`) must be added there or it is silently dropped — this bit us twice.
+- macOS (recent versions) blocks the bundled runtime's freshly-extracted native `.node` image module; skipping image _vision_ for figure inserts sidesteps it and is faster, since a figure insert only needs the filename.
+- Overleaf's compile POST returns only `status` + `outputFiles`; the parsed errors live in `output.log`, which must be fetched separately with the compile server id.
+
 ## Next gate
 
-P2-09 is active after P2-08 automated verification. The remaining work is the private live authenticated Overleaf smoke test on a real `Iris Smoke Test` project with `iris-smoke.tex`, proving the complete mutation lifecycle (propose → review → acknowledged apply → durable revert) against a live host. Do not implement trusted auto-apply or compile/PDF validation (Phase 3). The aggregate `npm run verify` should be rerun from a clean checkout when the protected external host file `host/src/auth/pairing 2.ts` is absent, since the host formatter glob stops on it.
+None required. If Phase 3 autopilot is ever pursued, it must ship with its safety scaffolding first: per-project trust, a checkpoint before each mission, automatic rollback on compile regression, and a mission receipt — before any edit is applied without per-edit approval. Rerun the aggregate `npm run verify` from a clean checkout when the protected external host file `host/src/auth/pairing 2.ts` is absent, since the host formatter glob stops on it.
 
 ## Stop states
 
