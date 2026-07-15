@@ -10342,7 +10342,6 @@ const Panel = () => {
       return;
     }
     if (!options?.recompileOnAccept) {
-      compileFixAttemptsRef.current = 0;
       return;
     }
     compileGuardianBusyRef.current = true;
