@@ -57,6 +57,11 @@ export function getOverleafCsrfToken(): string | null {
  * (the caller then attempts an upload without an explicit folder id).
  */
 export function getOverleafRootFolderId(): string | null {
+  // 0. The main-world content script discovers the id from React internals and
+  // mirrors it onto document.body (DOM attributes cross the isolated/main world
+  // boundary; React fiber expandos do not). This is the reliable source.
+  const published = document.body.getAttribute('data-ageaf-root-folder-id');
+  if (published && published.trim()) return published.trim();
   // 1. Direct meta tag (some versions).
   for (const name of ['ol-rootFolderId', 'ol-root_folder_id']) {
     const el = document.querySelector(`meta[name="${name}"]`);
@@ -147,7 +152,18 @@ export async function uploadFileToOverleaf(params: {
 }): Promise<OverleafUploadResult> {
   const fileName = sanitizeUploadName(params.name);
   const csrf = getOverleafCsrfToken();
-  const folderId = getOverleafRootFolderId();
+  // Ask the main-world script to (re)discover the root folder id, then give it
+  // a beat to mirror the value onto the DOM before we read it.
+  let folderId = getOverleafRootFolderId();
+  if (!folderId) {
+    try {
+      window.dispatchEvent(new CustomEvent('ageaf:overleaf:folder-id:refresh'));
+    } catch {
+      /* ignore */
+    }
+    await new Promise((r) => setTimeout(r, 250));
+    folderId = getOverleafRootFolderId();
+  }
   log('starting upload', {
     projectId: params.projectId,
     fileName,

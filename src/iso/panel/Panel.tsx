@@ -7417,7 +7417,7 @@ const Panel = () => {
                 });
               } else {
                 showAttachmentError(
-                  `Couldn't upload ${image.name} to Overleaf: ${result.error}`
+                  `Couldn't auto-add "${image.name}" to your Overleaf project (${result.error}). The figure will be inserted, but drag the image into Overleaf's file tree (left panel) so it compiles.`
                 );
               }
             } catch (error) {
