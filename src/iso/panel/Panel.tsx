@@ -1155,9 +1155,8 @@ const Panel = () => {
   // must be read as real file content (base64) — the native path-based dialog
   // cannot supply image bytes, so picked PNGs never reached the model.
   const attachInputRef = useRef<HTMLInputElement | null>(null);
-  // Compile guardian state (recompile-after-accept + bounded auto-fix).
+  // Compile guardian state (recompile-after-accept + non-disruptive notice).
   const compileGuardianBusyRef = useRef(false);
-  const compileFixAttemptsRef = useRef(0);
   const overlayActiveDetailsRef = useRef<Map<string, string>>(new Map());
   const [projectFiles, setProjectFiles] = useState<OverleafEntry[]>([]);
   const projectFilesRef = useRef<OverleafEntry[]>([]);
@@ -10352,22 +10351,17 @@ const Panel = () => {
       window.dispatchEvent(new CustomEvent('ageaf:overleaf:recompile'));
       await waitForCompileIdle();
       const newErrors = readCompileErrorCount();
+      // Non-disruptive: recompile so you see the result, and if the accepted
+      // edit introduced new errors, just say so — you ask for the fix (the
+      // model has the compile log). No auto-message, so it never blocks the
+      // panel or spawns cards you didn't ask for.
       if (newErrors > baselineErrors && newErrors > 0) {
-        if (compileFixAttemptsRef.current >= 2) {
-          showAttachmentError(
-            'The accepted edit still fails to compile after auto-fix attempts — stopping so you can review the log.'
-          );
-          compileFixAttemptsRef.current = 0;
-          return;
-        }
-        compileFixAttemptsRef.current += 1;
-        const log = document.body.getAttribute('data-ageaf-compile-log') ?? '';
-        const fixText =
-          'The edit I just accepted introduced a LaTeX compile error. Fix ONLY that error with a single surgical edit; I will recompile after I accept it.\n\nCompile log:\n' +
-          log.slice(0, 2000);
-        await sendMessage(fixText, [], [], [], 'chat');
-      } else {
-        compileFixAttemptsRef.current = 0;
+        const delta = newErrors - baselineErrors;
+        showAttachmentError(
+          `Recompile found ${delta} new compile error${
+            delta === 1 ? '' : 's'
+          } after that edit. Ask me to "fix the compile errors" and I'll use the log.`
+        );
       }
     } finally {
       compileGuardianBusyRef.current = false;
@@ -13096,10 +13090,11 @@ const Panel = () => {
                         Recompile after I accept an edit
                       </label>
                       <p class="ageaf-settings__hint">
-                        After you accept an edit, Iris recompiles the project.
-                        If that edit introduced a new compile error, it proposes
-                        a surgical fix (up to twice). Errors from your own manual
-                        recompiles are left alone.
+                        After you accept an edit, Iris recompiles the project so
+                        you see the result. If that edit introduced a new
+                        compile error, it tells you — then just ask "fix the
+                        compile errors" and it uses the log. It never auto-edits
+                        or acts on errors from your own manual recompiles.
                       </p>
                       <label class="ageaf-settings__checkbox">
                         <input
