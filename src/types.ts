@@ -63,6 +63,9 @@ export interface Options {
   debugCliEvents?: boolean;
   surroundingContextLimit?: number;
   skillTrustMode?: 'verified' | 'open';
+  /** Recompile the Overleaf project after an edit is accepted, and auto-propose
+   * a fix if the accepted edit introduced a new compile error. */
+  recompileOnAccept?: boolean;
 }
 export interface StreamChunk {
   kind: 'token' | 'error';

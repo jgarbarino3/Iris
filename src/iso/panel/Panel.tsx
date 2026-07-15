@@ -1155,6 +1155,9 @@ const Panel = () => {
   // must be read as real file content (base64) — the native path-based dialog
   // cannot supply image bytes, so picked PNGs never reached the model.
   const attachInputRef = useRef<HTMLInputElement | null>(null);
+  // Compile guardian state (recompile-after-accept + bounded auto-fix).
+  const compileGuardianBusyRef = useRef(false);
+  const compileFixAttemptsRef = useRef(0);
   const overlayActiveDetailsRef = useRef<Map<string, string>>(new Map());
   const [projectFiles, setProjectFiles] = useState<OverleafEntry[]>([]);
   const projectFilesRef = useRef<OverleafEntry[]>([]);
@@ -7393,14 +7396,20 @@ const Panel = () => {
       const uploadProjectId = getOverleafProjectIdFromPathname(
         window.location.pathname
       );
-      if (images.length > 0 && uploadProjectId) {
-        const wantsImageInDoc =
-          /\b(insert|include|includegraphics|add|put|place|embed|show|display|figure|caption|half[- ]?page|full[- ]?page|width)\b/i.test(
-            text
-          ) ||
+      // Figure-insertion intent: the image is being placed as a figure, not
+      // analyzed. In that case the model only needs the filename, so we skip
+      // sending the image bytes for vision — which also avoids the native
+      // image-processing step in the runtime that triggers macOS's unsigned
+      // native-module (.node) Gatekeeper popups.
+      const wantsImageInDoc =
+        images.length > 0 &&
+        (/\b(insert|include|includegraphics|add|put|place|embed|show|display|figure|caption|half[- ]?page|full[- ]?page|width)\b/i.test(
+          text
+        ) ||
           /\b(image|figure|picture|photo|diagram|graphic|screenshot|logo|plot|chart)\b/i.test(
             text
-          );
+          ));
+      if (images.length > 0 && uploadProjectId) {
         if (wantsImageInDoc) {
           for (const image of images) {
             try {
@@ -7441,7 +7450,10 @@ const Panel = () => {
         ...(uploadedImages.length > 0
           ? { uploadedImages }
           : {}),
-        ...(messageImages
+        // Skip image vision when the image is being inserted as a figure (the
+        // model works from the filename in `uploadedImages`), which avoids the
+        // runtime's native image processing and the macOS .node popup.
+        ...(messageImages && !wantsImageInDoc
           ? {
             images: messageImages.map((image) => ({
               id: image.id,
@@ -10281,6 +10293,69 @@ const Panel = () => {
   ): Promise<boolean> =>
     acceptPatchSubset([{ messageId, patchReview, overrideText }]);
 
+  // Compile guardian: after an accepted edit, optionally recompile Overleaf and,
+  // if THAT edit introduced a new compile error, auto-propose a surgical fix.
+  // Scoped to post-accept errors only (baseline vs. post-recompile count), and
+  // bounded to avoid loops. Reads state the main-world compile bridge mirrors
+  // onto document.body attributes.
+  const readCompileErrorCount = (): number => {
+    const v = document.body.getAttribute('data-ageaf-compile-errors');
+    const n = v ? parseInt(v, 10) : NaN;
+    return Number.isFinite(n) ? n : 0;
+  };
+  const waitForCompileIdle = async (timeoutMs = 45000): Promise<void> => {
+    const start = Date.now();
+    await new Promise((r) => setTimeout(r, 900)); // let the compile start
+    while (Date.now() - start < timeoutMs) {
+      if (
+        (document.body.getAttribute('data-ageaf-compile-status') ?? 'idle') !==
+        'compiling'
+      ) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  };
+  const runCompileGuardianAfterAccept = async () => {
+    if (compileGuardianBusyRef.current) return;
+    let options: Options | undefined;
+    try {
+      options = await getOptions();
+    } catch {
+      return;
+    }
+    if (!options?.recompileOnAccept) {
+      compileFixAttemptsRef.current = 0;
+      return;
+    }
+    compileGuardianBusyRef.current = true;
+    try {
+      const baselineErrors = readCompileErrorCount();
+      window.dispatchEvent(new CustomEvent('ageaf:overleaf:recompile'));
+      await waitForCompileIdle();
+      const newErrors = readCompileErrorCount();
+      if (newErrors > baselineErrors && newErrors > 0) {
+        if (compileFixAttemptsRef.current >= 2) {
+          showAttachmentError(
+            'The accepted edit still fails to compile after auto-fix attempts — stopping so you can review the log.'
+          );
+          compileFixAttemptsRef.current = 0;
+          return;
+        }
+        compileFixAttemptsRef.current += 1;
+        const log = document.body.getAttribute('data-ageaf-compile-log') ?? '';
+        const fixText =
+          'The edit I just accepted introduced a LaTeX compile error. Fix ONLY that error with a single surgical edit; I will recompile after I accept it.\n\nCompile log:\n' +
+          log.slice(0, 2000);
+        await sendMessage(fixText, [], [], [], 'chat');
+      } else {
+        compileFixAttemptsRef.current = 0;
+      }
+    } finally {
+      compileGuardianBusyRef.current = false;
+    }
+  };
+
   const onAcceptPatchReviewMessage = async (
     messageId: string,
     overrideText?: string
@@ -10294,11 +10369,13 @@ const Panel = () => {
     if (status !== 'pending') return;
 
     setPatchActionBusyId(messageId);
+    let accepted = false;
     try {
-      await acceptSinglePatch(messageId, patchReview, overrideText);
+      accepted = await acceptSinglePatch(messageId, patchReview, overrideText);
     } finally {
       setPatchActionBusyId(null);
     }
+    if (accepted) void runCompileGuardianAfterAccept();
   };
 
   const onBulkAcceptAll = async () => {
@@ -12987,6 +13064,24 @@ const Panel = () => {
                         Every document edit waits for your approval. Runtime
                         tool permissions do not change this. Auto-apply arrives
                         after the durable transaction engine.
+                      </p>
+                      <label class="ageaf-settings__checkbox">
+                        <input
+                          type="checkbox"
+                          checked={settings.recompileOnAccept ?? false}
+                          onChange={(event) =>
+                            updateSettings({
+                              recompileOnAccept: event.currentTarget.checked,
+                            })
+                          }
+                        />
+                        Recompile after I accept an edit
+                      </label>
+                      <p class="ageaf-settings__hint">
+                        After you accept an edit, Iris recompiles the project.
+                        If that edit introduced a new compile error, it proposes
+                        a surgical fix (up to twice). Errors from your own manual
+                        recompiles are left alone.
                       </p>
                       <label class="ageaf-settings__checkbox">
                         <input
