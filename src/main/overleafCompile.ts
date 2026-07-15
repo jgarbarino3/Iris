@@ -34,47 +34,76 @@ function setStatus(status: 'compiling' | 'idle'): void {
   }
 }
 
-function formatLogEntry(entry: any): string {
-  if (!entry || typeof entry !== 'object') return '';
-  const file =
-    entry.file || entry.fileName || (entry.raw && entry.raw.file) || '';
-  const line =
-    entry.line != null && entry.line !== ''
-      ? `:${entry.line}`
-      : entry.lineNumber != null
-      ? `:${entry.lineNumber}`
-      : '';
-  const message =
-    entry.message ||
-    entry.messageComponent ||
-    entry.content ||
-    (typeof entry.raw === 'string' ? entry.raw : '') ||
-    '';
-  return `${file}${line} ${String(message)}`.replace(/\s+/g, ' ').trim();
+/**
+ * Extract error-relevant blocks from a raw LaTeX `output.log`. LaTeX errors
+ * begin with `! ` (and package errors with `! ...Error:`); we also keep
+ * common failure markers. Each match keeps a few following lines for context
+ * (the offending source line usually appears within a line or two).
+ */
+function extractLogErrors(logText: string): { errors: number; text: string } {
+  const lines = logText.split(/\r?\n/);
+  const markerRe =
+    /^!\s|LaTeX Error|Undefined control sequence|Emergency stop|Runaway argument|Package .* Error|File `.*' not found|Missing \\|Extra \}|Too many \}|\\begin\{.*\} on input line/;
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (markerRe.test(lines[i])) {
+      const block = lines
+        .slice(i, i + 6)
+        .join('\n')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+      if (block) blocks.push(block);
+    }
+  }
+  // De-duplicate identical blocks (LaTeX repeats some).
+  const unique = Array.from(new Set(blocks));
+  const text = unique.join('\n---\n').slice(0, 5000);
+  return { errors: unique.length, text };
+}
+
+function publishFromRawLog(logText: string, status: unknown): void {
+  const { errors, text } = extractLogErrors(logText);
+  // If nothing matched but the compile itself failed, hand over the log tail so
+  // the model still has something to work with.
+  const fallback =
+    !text && status && status !== 'success' ? logText.slice(-3000) : '';
+  document.body.setAttribute(ERRORS_ATTR, String(errors));
+  document.body.setAttribute(LOG_ATTR, text || fallback);
+  setStatus('idle');
+  log('parsed output.log', { errors, status });
+}
+
+function findOutputLogUrl(data: any): string | null {
+  const files = data && data.outputFiles;
+  if (!Array.isArray(files)) return null;
+  const logFile =
+    files.find((f) => f && /(^|\/)output\.log$/.test(String(f.path || ''))) ||
+    files.find((f) => f && String(f.type || '') === 'log');
+  return logFile && typeof logFile.url === 'string' ? logFile.url : null;
 }
 
 function publishFromCompileResponse(data: any): void {
   try {
-    const entries = data && data.logEntries;
-    const errors: any[] = Array.isArray(entries && entries.errors)
-      ? entries.errors
-      : [];
-    // Some responses only populate `all`; keep error-severity ones.
-    const all: any[] = Array.isArray(entries && entries.all) ? entries.all : [];
-    const errorList =
-      errors.length > 0
-        ? errors
-        : all.filter((e) => /error/i.test(String(e && e.level)));
-    const messages = errorList.map(formatLogEntry).filter(Boolean);
-    document.body.setAttribute(ERRORS_ATTR, String(errorList.length));
-    document.body.setAttribute(LOG_ATTR, messages.join('\n').slice(0, 4000));
-    setStatus('idle');
-    log('parsed compile response', {
-      status: data && data.status,
-      errors: errorList.length,
-    });
+    const status = data && data.status;
+    const logUrl = findOutputLogUrl(data);
+    if (!logUrl) {
+      // No log file (e.g. compile failed before producing one) — clear state.
+      document.body.setAttribute(ERRORS_ATTR, '0');
+      document.body.setAttribute(LOG_ATTR, '');
+      setStatus('idle');
+      log('compile response had no output.log', { status });
+      return;
+    }
+    log('fetching output.log', { logUrl: logUrl.slice(0, 120), status });
+    fetch(logUrl, { credentials: 'include' })
+      .then((r) => r.text())
+      .then((text) => publishFromRawLog(text, status))
+      .catch((error) => {
+        log('failed to fetch output.log', String(error));
+        setStatus('idle');
+      });
   } catch (error) {
-    log('failed to parse compile response', String(error));
+    log('failed to handle compile response', String(error));
     setStatus('idle');
   }
 }
