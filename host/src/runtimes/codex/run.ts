@@ -195,6 +195,7 @@ function getContextForPrompt(
     pickString('selection');
     pickString('activeFile');
     pickString('activeFileId');
+    pickString('compileLog');
 
     // Only send surrounding context if limit > 0
     if (limit > 0) {

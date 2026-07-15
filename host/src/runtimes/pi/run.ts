@@ -103,6 +103,7 @@ function getContextForPrompt(
     pickString('selection');
     pickString('activeFile');
     pickString('activeFileId');
+    pickString('compileLog');
     if (limit > 0) {
       pickString('surroundingBefore', 'start');
       pickString('surroundingAfter', 'end');

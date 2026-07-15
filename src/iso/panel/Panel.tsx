@@ -7439,8 +7439,26 @@ const Panel = () => {
           }
         }
       }
+      // Attach the current Overleaf compile log when the project has errors, so
+      // the model can fix a compile problem it's asked about. The main-world
+      // compile bridge publishes this from Overleaf's compile response.
+      const compileErrorAttr = document.body.getAttribute(
+        'data-ageaf-compile-errors'
+      );
+      const compileErrorCount = compileErrorAttr
+        ? parseInt(compileErrorAttr, 10)
+        : 0;
+      const compileLogText = (
+        document.body.getAttribute('data-ageaf-compile-log') || ''
+      ).trim();
+      const includeCompileLog =
+        compileLogText.length > 0 &&
+        (!Number.isFinite(compileErrorCount) || compileErrorCount > 0);
       const sharedContext = {
         ...contextPayload,
+        ...(includeCompileLog
+          ? { compileLog: compileLogText.slice(0, 4000) }
+          : {}),
         ...(activeFileNameForContext
           ? { activeFile: activeFileNameForContext }
           : {}),

@@ -3,16 +3,14 @@
 /**
  * Compile guardian — main-world bridge to Overleaf's compiler.
  *
- * Runs in the page's world so it can click Overleaf's Recompile control and read
- * the compile log. It mirrors compile state onto `document.body` attributes
- * (which cross the isolated/main world boundary) so the panel can:
- *   - trigger a recompile after an accepted edit,
- *   - detect when a compile finishes,
- *   - read the current error count + messages to decide whether the accepted
- *     edit introduced a new error.
- *
- * Overleaf's DOM varies by version, so selectors are defensive and everything is
- * logged under `[Iris Compile]` for one-shot calibration.
+ * Runs in the page's world so it can (a) click Overleaf's Recompile control and
+ * (b) intercept Overleaf's compile response, which carries structured
+ * `logEntries` (errors/warnings with file+line+message). Intercepting the
+ * response is far more reliable than scraping the log DOM. Compile state is
+ * mirrored onto `document.body` attributes (which cross the isolated/main world
+ * boundary) so the panel can trigger a recompile, know when it finished, and
+ * read the error count + log to decide whether an accepted edit broke the build
+ * and to hand the log to the model for a fix.
  */
 
 const STATUS_ATTR = 'data-ageaf-compile-status'; // 'compiling' | 'idle'
@@ -28,6 +26,102 @@ function log(message: string, data?: unknown): void {
   }
 }
 
+function setStatus(status: 'compiling' | 'idle'): void {
+  try {
+    document.body.setAttribute(STATUS_ATTR, status);
+  } catch {
+    /* ignore */
+  }
+}
+
+function formatLogEntry(entry: any): string {
+  if (!entry || typeof entry !== 'object') return '';
+  const file =
+    entry.file || entry.fileName || (entry.raw && entry.raw.file) || '';
+  const line =
+    entry.line != null && entry.line !== ''
+      ? `:${entry.line}`
+      : entry.lineNumber != null
+      ? `:${entry.lineNumber}`
+      : '';
+  const message =
+    entry.message ||
+    entry.messageComponent ||
+    entry.content ||
+    (typeof entry.raw === 'string' ? entry.raw : '') ||
+    '';
+  return `${file}${line} ${String(message)}`.replace(/\s+/g, ' ').trim();
+}
+
+function publishFromCompileResponse(data: any): void {
+  try {
+    const entries = data && data.logEntries;
+    const errors: any[] = Array.isArray(entries && entries.errors)
+      ? entries.errors
+      : [];
+    // Some responses only populate `all`; keep error-severity ones.
+    const all: any[] = Array.isArray(entries && entries.all) ? entries.all : [];
+    const errorList =
+      errors.length > 0
+        ? errors
+        : all.filter((e) => /error/i.test(String(e && e.level)));
+    const messages = errorList.map(formatLogEntry).filter(Boolean);
+    document.body.setAttribute(ERRORS_ATTR, String(errorList.length));
+    document.body.setAttribute(LOG_ATTR, messages.join('\n').slice(0, 4000));
+    setStatus('idle');
+    log('parsed compile response', {
+      status: data && data.status,
+      errors: errorList.length,
+    });
+  } catch (error) {
+    log('failed to parse compile response', String(error));
+    setStatus('idle');
+  }
+}
+
+function isCompileUrl(url: string): boolean {
+  return /\/compile\b/.test(url) && !/\/output\//.test(url);
+}
+
+/** Wrap fetch so we can observe Overleaf's compile requests and responses. */
+function installCompileFetchHook(): void {
+  const w = window as any;
+  if (w.__ageafCompileHooked) return;
+  const originalFetch = window.fetch;
+  if (typeof originalFetch !== 'function') return;
+  w.__ageafCompileHooked = true;
+  window.fetch = function (this: unknown, ...args: any[]) {
+    let url = '';
+    try {
+      const first = args[0];
+      url = typeof first === 'string' ? first : first && first.url ? first.url : '';
+    } catch {
+      /* ignore */
+    }
+    const watching = url && isCompileUrl(url);
+    if (watching) setStatus('compiling');
+    const result = originalFetch.apply(this, args as any);
+    if (watching && result && typeof result.then === 'function') {
+      result
+        .then((resp: Response) => {
+          try {
+            resp
+              .clone()
+              .json()
+              .then((data: any) => publishFromCompileResponse(data))
+              .catch(() => setStatus('idle'));
+          } catch {
+            setStatus('idle');
+          }
+          return resp;
+        })
+        .catch(() => setStatus('idle'));
+    }
+    return result;
+  } as typeof window.fetch;
+  log('compile response hook installed');
+}
+
 function findRecompileButton(): HTMLElement | null {
   const selectors = [
     '.btn-recompile',
@@ -40,7 +134,6 @@ function findRecompileButton(): HTMLElement | null {
     const el = document.querySelector(s);
     if (el instanceof HTMLElement) return el;
   }
-  // Fall back to the primary green compile button by its label text.
   const buttons = Array.from(
     document.querySelectorAll('button, [role="button"]')
   );
@@ -51,62 +144,14 @@ function findRecompileButton(): HTMLElement | null {
   return (byText as HTMLElement) || null;
 }
 
-function isCompiling(): boolean {
-  // Overleaf disables/animates the recompile button and shows "Compiling…".
-  const btn = findRecompileButton();
-  if (btn) {
-    const t = (btn.textContent || '').toLowerCase();
-    if (t.includes('compiling')) return true;
-    if (btn.getAttribute('aria-disabled') === 'true') return true;
-  }
-  return !!document.querySelector(
-    '[class*="compiling" i], .pdf-loading-indicator, [class*="compile-loading" i]'
-  );
-}
-
-function readErrors(): { errors: number; messages: string[] } {
-  const entries = Array.from(
-    document.querySelectorAll(
-      '.log-entry, [class*="log-entry"], [data-testid*="log-entry"]'
-    )
-  );
-  const messages: string[] = [];
-  let errors = 0;
-  for (const entry of entries) {
-    const cls = entry.className || '';
-    const isError =
-      /\berror\b/i.test(String(cls)) ||
-      !!entry.querySelector('[class*="error" i]') ||
-      /^error/i.test((entry.textContent || '').trim());
-    if (isError) {
-      errors += 1;
-      const text = (entry.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text) messages.push(text.slice(0, 400));
-    }
-  }
-  return { errors, messages };
-}
-
-function publishState(): void {
-  try {
-    const compiling = isCompiling();
-    document.body.setAttribute(STATUS_ATTR, compiling ? 'compiling' : 'idle');
-    if (!compiling) {
-      const { errors, messages } = readErrors();
-      document.body.setAttribute(ERRORS_ATTR, String(errors));
-      document.body.setAttribute(LOG_ATTR, messages.join('\n').slice(0, 3000));
-    }
-  } catch {
-    /* best effort */
-  }
-}
-
 export function triggerRecompile(): boolean {
   const btn = findRecompileButton();
   if (btn) {
-    log('clicking recompile', { text: (btn.textContent || '').trim().slice(0, 40) });
+    log('clicking recompile', {
+      text: (btn.textContent || '').trim().slice(0, 40),
+    });
+    setStatus('compiling');
     btn.click();
-    document.body.setAttribute(STATUS_ATTR, 'compiling');
     return true;
   }
   log('recompile button not found');
@@ -114,8 +159,7 @@ export function triggerRecompile(): boolean {
 }
 
 export function registerOverleafCompile(): void {
-  window.setInterval(publishState, 1000);
-  publishState();
+  installCompileFetchHook();
   window.addEventListener('ageaf:overleaf:recompile', () => {
     triggerRecompile();
   });
